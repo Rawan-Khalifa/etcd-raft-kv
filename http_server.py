@@ -1,0 +1,116 @@
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse
+import json
+from kvstore import KVStore
+
+class KVStoreHandler(BaseHTTPRequestHandler):
+    """HTTP request handler for our KV store"""
+    
+    # Class variable - shared across all handler instances
+    store = None
+    
+    def _set_headers(self, status_code=200, content_type='application/json'):
+        """Helper to set response headers"""
+        self.send_response(status_code)
+        self.send_header('Content-Type', content_type)
+        self.end_headers()
+    
+    def _send_json(self, data, status_code=200):
+        """Helper to send JSON response"""
+        self._set_headers(status_code)
+        self.wfile.write(json.dumps(data).encode('utf-8'))
+    
+    def _parse_key_from_path(self):
+        """Extract key from URL path like /kv/mykey"""
+        path = urlparse(self.path).path
+        parts = path.strip('/').split('/')
+        
+        # Expected format: /kv/{key}
+        if len(parts) >= 2 and parts[0] == 'kv':
+            return '/'.join(parts[1:])  # in case, i'd support keys with slashes
+        return None
+    
+    def do_GET(self):
+        """Handle GET requests - retrieve a value"""
+        key = self._parse_key_from_path()
+        
+        if key is None:
+            self._send_json({'error': 'Invalid path. Use /kv/{key}'}, 400) # status code 400
+            return
+        
+        value = self.store.get(key) # remember? we created a class variable store line 10
+        
+        if value is None:
+            self._send_json({'error': 'Key not found'}, 404)
+        else:
+            self._send_json({'key': key, 'value': value}) # default status code 200, and we using dict, so json format
+    
+    def do_PUT(self):
+        """Handle PUT requests - store a key-value pair"""
+        key = self._parse_key_from_path()
+        
+        if key is None:
+            self._send_json({'error': 'Invalid path. Use /kv/{key}'}, 400)
+            return
+        
+        # Read the request body to get the value
+        content_length = int(self.headers.get('Content-Length', 0)) # how many bytes to read
+        body = self.rfile.read(content_length).decode('utf-8')
+        
+        try:
+            data = json.loads(body)
+            value = data.get('value')
+            
+            if value is None:
+                self._send_json({'error': 'Missing "value" in request body'}, 400)
+                return
+            
+            self.store.put(key, value)
+            self._send_json({'key': key, 'value': value, 'message': 'Stored successfully'})
+            
+        except json.JSONDecodeError:
+            self._send_json({'error': 'Invalid JSON in request body'}, 400)
+    
+    def do_DELETE(self):
+        """Handle DELETE requests - delete a key"""
+        key = self._parse_key_from_path()
+        
+        if key is None:
+            self._send_json({'error': 'Invalid path. Use /kv/{key}'}, 400)
+            return
+        
+        deleted = self.store.delete(key)
+        
+        if deleted:
+            self._send_json({'key': key, 'message': 'Deleted successfully'})
+        else:
+            self._send_json({'error': 'Key not found'}, 404)
+    
+    def log_message(self, format, *args):
+        """Override to customize logging"""
+        print(f"[HTTP] {self.command} {self.path} - {args[1]}")
+
+
+def run_server(host='localhost', port=8080):
+    """Start the HTTP server"""
+    # Create the store and attach it to the handler class
+    KVStoreHandler.store = KVStore()
+    
+    server_address = (host, port)
+    httpd = HTTPServer(server_address, KVStoreHandler)
+    
+    print(f"🚀 KV Store server running on http://{host}:{port}")
+    print(f"   GET    http://{host}:{port}/kv/{{key}}")
+    print(f"   PUT    http://{host}:{port}/kv/{{key}}")
+    print(f"   DELETE http://{host}:{port}/kv/{{key}}")
+    print("\nPress Ctrl+C to stop\n")
+    
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n\n Shutting down server.. womp wooomp...")
+        httpd.shutdown()
+
+
+if __name__ == "__main__":
+    run_server()
