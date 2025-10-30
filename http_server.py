@@ -1,13 +1,14 @@
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 import json
-from kvstore import KVStore
+from coordinator import Coordinator
+from command import Command, CommandType
 
 class KVStoreHandler(BaseHTTPRequestHandler):
-    """HTTP request handler for our KV store"""
+    """HTTP request handler but now using coordinator"""
     
-    # Class variable - shared across all handler instances
-    store = None
+    # Class variable - shared coordinator
+    coordinator = None
     
     def _set_headers(self, status_code=200, content_type='application/json'):
         """Helper to set response headers"""
@@ -25,26 +26,34 @@ class KVStoreHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         parts = path.strip('/').split('/')
         
-        # Expected format: /kv/{key}
         if len(parts) >= 2 and parts[0] == 'kv':
-            return '/'.join(parts[1:])  # in case, i'd support keys with slashes
+            return '/'.join(parts[1:])
         return None
     
     def do_GET(self):
-        """Handle GET requests - retrieve a value"""
+        """Handle GET requests"""
+        path = urlparse(self.path).path
+        
+        # Status endpoint
+        if path == '/status':
+            status = self.coordinator.get_status()
+            self._send_json(status)
+            return
+        
+        # Key-value get
         key = self._parse_key_from_path()
         
         if key is None:
-            self._send_json({'error': 'Invalid path. Use /kv/{key}'}, 400) # status code 400
+            self._send_json({'error': 'Invalid path. Use /kv/{key}'}, 400)
             return
         
-        value = self.store.get(key) # remember? we created a class variable store line 10
+        value = self.coordinator.get(key)
         
         if value is None:
             self._send_json({'error': 'Key not found'}, 404)
         else:
-            self._send_json({'key': key, 'value': value}) # default status code 200, and we using dict, so json format
-    
+            self._send_json({'key': key, 'value': value})
+            
     def do_PUT(self):
         """Handle PUT requests - store a key-value pair"""
         key = self._parse_key_from_path()
