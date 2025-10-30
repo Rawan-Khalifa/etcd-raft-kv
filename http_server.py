@@ -3,6 +3,7 @@ from urllib.parse import urlparse
 import json
 from coordinator import Coordinator
 from command import Command, CommandType
+import threading
 
 class KVStoreHandler(BaseHTTPRequestHandler):
     """HTTP request handler but now using coordinator"""
@@ -33,6 +34,13 @@ class KVStoreHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         """Handle GET requests"""
         path = urlparse(self.path).path
+        
+        # Add shutdown endpoint
+        if path == '/shutdown':
+            self._send_json({'message': 'Shutting down'})
+            # Schedule server shutdown
+            threading.Thread(target=self.server.shutdown).start()
+            return
         
         # Status endpoint
         if path == '/status':
