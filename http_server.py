@@ -1,13 +1,15 @@
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 import json
-from kvstore import KVStore
+from coordinator import Coordinator
+from command import Command, CommandType
+import threading
 
 class KVStoreHandler(BaseHTTPRequestHandler):
-    """HTTP request handler for our KV store"""
+    """HTTP request handler but now using coordinator"""
     
-    # Class variable - shared across all handler instances
-    store = None
+    # Class variable - shared coordinator
+    coordinator = None
     
     def _set_headers(self, status_code=200, content_type='application/json'):
         """Helper to set response headers"""
@@ -25,36 +27,51 @@ class KVStoreHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         parts = path.strip('/').split('/')
         
-        # Expected format: /kv/{key}
         if len(parts) >= 2 and parts[0] == 'kv':
-            return '/'.join(parts[1:])  # in case, i'd support keys with slashes
+            return '/'.join(parts[1:])
         return None
     
     def do_GET(self):
-        """Handle GET requests - retrieve a value"""
-        key = self._parse_key_from_path()
+        """Handle GET requests"""
+        path = urlparse(self.path).path
         
-        if key is None:
-            self._send_json({'error': 'Invalid path. Use /kv/{key}'}, 400) # status code 400
+        # Add shutdown endpoint
+        if path == '/shutdown':
+            self._send_json({'message': 'Shutting down'})
+            # Schedule server shutdown
+            threading.Thread(target=self.server.shutdown).start()
             return
         
-        value = self.store.get(key) # remember? we created a class variable store line 10
+        # Status endpoint
+        if path == '/status':
+            status = self.coordinator.get_status()
+            self._send_json(status)
+            return
         
-        if value is None:
-            self._send_json({'error': 'Key not found'}, 404)
-        else:
-            self._send_json({'key': key, 'value': value}) # default status code 200, and we using dict, so json format
-    
-    def do_PUT(self):
-        """Handle PUT requests - store a key-value pair"""
+        # Key-value get
         key = self._parse_key_from_path()
         
         if key is None:
             self._send_json({'error': 'Invalid path. Use /kv/{key}'}, 400)
             return
         
-        # Read the request body to get the value
-        content_length = int(self.headers.get('Content-Length', 0)) # how many bytes to read
+        value = self.coordinator.get(key)
+        
+        if value is None:
+            self._send_json({'error': 'Key not found'}, 404)
+        else:
+            self._send_json({'key': key, 'value': value})
+
+    def do_PUT(self):
+        """Handle PUT requests - now goes through coordinator"""
+        key = self._parse_key_from_path()
+        
+        if key is None:
+            self._send_json({'error': 'Invalid path. Use /kv/{key}'}, 400)
+            return
+        
+        # Read request body
+        content_length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_length).decode('utf-8')
         
         try:
@@ -65,26 +82,56 @@ class KVStoreHandler(BaseHTTPRequestHandler):
                 self._send_json({'error': 'Missing "value" in request body'}, 400)
                 return
             
-            self.store.put(key, value)
-            self._send_json({'key': key, 'value': value, 'message': 'Stored successfully'})
+            # Create command and propose it
+            command = Command(CommandType.PUT, key, value)
+            result = self.coordinator.propose_command(command)
+            
+            if result['success']:
+                self._send_json({
+                    'key': key,
+                    'value': value,
+                    'message': 'Stored successfully',
+                    'log_index': result['index']
+                })
+            else:
+                self._send_json({
+                    'error': result.get('error', 'Failed to store'),
+                    'leader': result.get('leader')
+                }, 500)
             
         except json.JSONDecodeError:
             self._send_json({'error': 'Invalid JSON in request body'}, 400)
+        except Exception as e:
+            self._send_json({'error': str(e)}, 500)
+    
     
     def do_DELETE(self):
-        """Handle DELETE requests - delete a key"""
+        """Handle DELETE requests - now goes through coordinator"""
         key = self._parse_key_from_path()
         
         if key is None:
             self._send_json({'error': 'Invalid path. Use /kv/{key}'}, 400)
             return
         
-        deleted = self.store.delete(key)
-        
-        if deleted:
-            self._send_json({'key': key, 'message': 'Deleted successfully'})
-        else:
-            self._send_json({'error': 'Key not found'}, 404)
+        try:
+            # Create delete command and propose it
+            command = Command(CommandType.DELETE, key)
+            result = self.coordinator.propose_command(command)
+            
+            if result['success']:
+                self._send_json({
+                    'key': key,
+                    'message': 'Deleted successfully',
+                    'log_index': result['index']
+                })
+            else:
+                self._send_json({
+                    'error': result.get('error', 'Failed to delete'),
+                    'leader': result.get('leader')
+                }, 500)
+                
+        except Exception as e:
+            self._send_json({'error': str(e)}, 500)
     
     def log_message(self, format, *args):
         """Override to customize logging"""
@@ -92,23 +139,25 @@ class KVStoreHandler(BaseHTTPRequestHandler):
 
 
 def run_server(host='localhost', port=8080):
-    """Start the HTTP server"""
-    # Create the store and attach it to the handler class
-    KVStoreHandler.store = KVStore()
+    """Start the HTTP server with coordinator"""
+
+    KVStoreHandler.coordinator = Coordinator()
     
     server_address = (host, port)
     httpd = HTTPServer(server_address, KVStoreHandler)
     
-    print(f"🚀 KV Store server running on http://{host}:{port}")
+    print(f" KV Store server (with commands!) running on http://{host}:{port}")
     print(f"   GET    http://{host}:{port}/kv/{{key}}")
     print(f"   PUT    http://{host}:{port}/kv/{{key}}")
     print(f"   DELETE http://{host}:{port}/kv/{{key}}")
+    print(f"   GET    http://{host}:{port}/status")
     print("\nPress Ctrl+C to stop\n")
     
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\n\n Shutting down server.. womp wooomp...")
+        KVStoreHandler.coordinator.shutdown()
         httpd.shutdown()
 
 
