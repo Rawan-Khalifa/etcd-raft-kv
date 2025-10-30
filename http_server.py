@@ -53,7 +53,7 @@ class KVStoreHandler(BaseHTTPRequestHandler):
             self._send_json({'error': 'Key not found'}, 404)
         else:
             self._send_json({'key': key, 'value': value})
-            
+
     def do_PUT(self):
         """Handle PUT requests - store a key-value pair"""
         key = self._parse_key_from_path()
@@ -81,19 +81,32 @@ class KVStoreHandler(BaseHTTPRequestHandler):
             self._send_json({'error': 'Invalid JSON in request body'}, 400)
     
     def do_DELETE(self):
-        """Handle DELETE requests - delete a key"""
+        """Handle DELETE requests - now goes through coordinator"""
         key = self._parse_key_from_path()
         
         if key is None:
             self._send_json({'error': 'Invalid path. Use /kv/{key}'}, 400)
             return
         
-        deleted = self.store.delete(key)
-        
-        if deleted:
-            self._send_json({'key': key, 'message': 'Deleted successfully'})
-        else:
-            self._send_json({'error': 'Key not found'}, 404)
+        try:
+            # Create delete command and propose it
+            command = Command(CommandType.DELETE, key)
+            result = self.coordinator.propose_command(command)
+            
+            if result['success']:
+                self._send_json({
+                    'key': key,
+                    'message': 'Deleted successfully',
+                    'log_index': result['index']
+                })
+            else:
+                self._send_json({
+                    'error': result.get('error', 'Failed to delete'),
+                    'leader': result.get('leader')
+                }, 500)
+                
+        except Exception as e:
+            self._send_json({'error': str(e)}, 500)
     
     def log_message(self, format, *args):
         """Override to customize logging"""
