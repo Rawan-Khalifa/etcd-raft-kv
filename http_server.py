@@ -114,23 +114,25 @@ class KVStoreHandler(BaseHTTPRequestHandler):
 
 
 def run_server(host='localhost', port=8080):
-    """Start the HTTP server"""
-    # Create the store and attach it to the handler class
-    KVStoreHandler.store = KVStore()
+    """Start the HTTP server with coordinator"""
+
+    KVStoreHandler.coordinator = Coordinator()
     
     server_address = (host, port)
     httpd = HTTPServer(server_address, KVStoreHandler)
     
-    print(f"🚀 KV Store server running on http://{host}:{port}")
+    print(f" KV Store server (with commands!) running on http://{host}:{port}")
     print(f"   GET    http://{host}:{port}/kv/{{key}}")
     print(f"   PUT    http://{host}:{port}/kv/{{key}}")
     print(f"   DELETE http://{host}:{port}/kv/{{key}}")
+    print(f"   GET    http://{host}:{port}/status")
     print("\nPress Ctrl+C to stop\n")
     
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\n\n Shutting down server.. womp wooomp...")
+        KVStoreHandler.coordinator.shutdown()
         httpd.shutdown()
 
 
