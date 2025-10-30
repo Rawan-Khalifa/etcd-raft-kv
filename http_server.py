@@ -55,15 +55,15 @@ class KVStoreHandler(BaseHTTPRequestHandler):
             self._send_json({'key': key, 'value': value})
 
     def do_PUT(self):
-        """Handle PUT requests - store a key-value pair"""
+        """Handle PUT requests - now goes through coordinator"""
         key = self._parse_key_from_path()
         
         if key is None:
             self._send_json({'error': 'Invalid path. Use /kv/{key}'}, 400)
             return
         
-        # Read the request body to get the value
-        content_length = int(self.headers.get('Content-Length', 0)) # how many bytes to read
+        # Read request body
+        content_length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_length).decode('utf-8')
         
         try:
@@ -74,11 +74,28 @@ class KVStoreHandler(BaseHTTPRequestHandler):
                 self._send_json({'error': 'Missing "value" in request body'}, 400)
                 return
             
-            self.store.put(key, value)
-            self._send_json({'key': key, 'value': value, 'message': 'Stored successfully'})
+            # Create command and propose it
+            command = Command(CommandType.PUT, key, value)
+            result = self.coordinator.propose_command(command)
+            
+            if result['success']:
+                self._send_json({
+                    'key': key,
+                    'value': value,
+                    'message': 'Stored successfully',
+                    'log_index': result['index']
+                })
+            else:
+                self._send_json({
+                    'error': result.get('error', 'Failed to store'),
+                    'leader': result.get('leader')
+                }, 500)
             
         except json.JSONDecodeError:
             self._send_json({'error': 'Invalid JSON in request body'}, 400)
+        except Exception as e:
+            self._send_json({'error': str(e)}, 500)
+    
     
     def do_DELETE(self):
         """Handle DELETE requests - now goes through coordinator"""
