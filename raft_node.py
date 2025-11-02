@@ -304,15 +304,111 @@ class RaftNode:
         safe_print(f"[{self.node_id}] Lost election (got {votes_received}/{votes_needed} votes)")
     
     def _send_heartbeats(self):
-        """
-        Send heartbeat (empty AppendEntries) to all followers.
-        """
-        # TODO: Implement actual RPC calls
-        # For now, just log that we're sending heartbeats
+        """Send heartbeats/log entries to all followers"""
         with self._lock:
-            if self.state == NodeState.LEADER:
-                pass  # In multi-node, would send AppendEntries RPC here
-    
+            if self.state != NodeState.LEADER:
+                return
+            
+            leader_commit = self.commit_index
+            
+            # Send to each peer
+            for peer_address in self.peers:
+                self._replicate_to_peer(peer_address, leader_commit)
+
+    def _replicate_to_peer(self, peer_address: str, leader_commit: int):
+        """
+        Replicate log entries to a specific peer.
+        
+        This implements the core log replication mechanism.
+        """
+        with self._lock:
+            # Get the next index to send to this peer
+            next_idx = self.next_index.get(peer_address, 1)
+            
+            # Get prev log entry info
+            prev_log_index = next_idx - 1
+            prev_log_term = 0
+            if prev_log_index > 0:
+                prev_entry = self.log.get(prev_log_index)
+                if prev_entry:
+                    prev_log_term = prev_entry.term
+            
+            # Get entries to send (from next_idx to end of log)
+            entries_to_send = []
+            last_log_index = self.log.last_index()
+            
+            if next_idx <= last_log_index:
+                # There are entries to send
+                for i in range(next_idx, last_log_index + 1):
+                    entry = self.log.get(i)
+                    if entry:
+                        entries_to_send.append(LogEntryData(
+                            index=entry.index,
+                            term=entry.term,
+                            command=entry.command.to_dict()
+                        ))
+            
+            # Create request
+            request = AppendEntriesRequest(
+                term=self.current_term,
+                leader_id=self.node_id,
+                prev_log_index=prev_log_index,
+                prev_log_term=prev_log_term,
+                entries=entries_to_send,
+                leader_commit=leader_commit
+            )
+        
+        # Send RPC (outside lock to avoid blocking)
+        response = self.rpc_client.append_entries(peer_address, request)
+        
+        if response is None:
+            return
+        
+        with self._lock:
+            # If we discover a higher term, step down
+            if response.term > self.current_term:
+                self._become_follower(response.term)
+                return
+            
+            # Only process if we're still leader
+            if self.state != NodeState.LEADER:
+                return
+            
+            if response.success:
+                # Update next_index and match_index for follower
+                self.match_index[peer_address] = response.match_index
+                self.next_index[peer_address] = response.match_index + 1
+                
+                # Check if we can advance commit_index
+                self._advance_commit_index()
+            else:
+                # Replication failed, decrement next_index and retry
+                self.next_index[peer_address] = max(1, self.next_index[peer_address] - 1)
+
+    def _advance_commit_index(self):
+        """
+        Advance commit_index based on what's been replicated to a majority.
+        
+        Leader commits an entry once it's replicated to a majority of servers.
+        """
+        # Count how many nodes have each index
+        for n in range(self.commit_index + 1, self.log.last_index() + 1):
+            # Count ourselves
+            count = 1
+            
+            # Count peers that have this entry
+            for peer_address in self.peers:
+                if self.match_index.get(peer_address, 0) >= n:
+                    count += 1
+            
+            # If majority has this entry, and it's from current term, commit it
+            majority = (len(self.peers) + 1) // 2 + 1
+            if count >= majority:
+                entry = self.log.get(n)
+                if entry and entry.term == self.current_term:
+                    self.commit_index = n
+                    safe_print(f"[{self.node_id}] Advanced commit_index to {n}")
+        
     def propose_command(self, command: Command) -> dict:
         """
         Propose a command to be added to the log.
