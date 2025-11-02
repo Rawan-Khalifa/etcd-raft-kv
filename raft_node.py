@@ -589,15 +589,23 @@ class RaftNode:
                     match_index=0
                 )
             
-            # If we receive a message from a leader with equal or higher term,
-            # recognize it as leader and become follower
-            if request.term >= self.current_term:
+            # If we receive AppendEntries with term >= currentTerm:
+            # - If we're a candidate or leader with equal term, there's a leader, step down
+            # - If term is higher, definitely step down
+            if request.term > self.current_term:
                 self._become_follower(request.term)
+                self.leader_id = request.leader_id
+            elif request.term == self.current_term:
+                # Same term - if we're candidate or leader, we must step down
+                # (another node won the election or is already leader)
+                if self.state != NodeState.FOLLOWER:
+                    print(f"[{self.node_id}] Stepping down - discovered leader {request.leader_id} in same term {request.term}")
+                    self._become_follower(request.term)
                 self.leader_id = request.leader_id
             
             # Reset election timeout (we heard from leader)
             self.last_heartbeat = time.time()
-            self.election_timeout = self._random_election_timeout()   # added this
+            self.election_timeout = self._random_election_timeout()
             
             # Check if our log contains an entry at prev_log_index with matching term
             if request.prev_log_index > 0:
