@@ -550,7 +550,18 @@ class RaftNode:
             
             # If candidate's term is newer, become follower
             if request.term > self.current_term:
+                print(f"[{self.node_id}] Discovered higher term {request.term} in vote request, stepping down")
                 self._become_follower(request.term)
+
+
+            # If we're a leader in the same term, we already won the election
+            # Don't grant vote to another candidate
+            if request.term == self.current_term and self.state == NodeState.LEADER:
+                print(f"[{self.node_id}] Rejecting vote - already leader in term {request.term}")
+                return RequestVoteResponse(
+                    term=self.current_term,
+                    vote_granted=False
+                )
             
             # Check if we can vote for this candidate
             can_vote = (
