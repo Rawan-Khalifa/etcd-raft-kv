@@ -247,7 +247,7 @@ class RaftNode:
             last_log_index = self.log.last_index()
             last_log_term = self.log.last_term()
         
-        safe_print(f"[{self.node_id}] Starting election for term {term}")
+        print(f"[{self.node_id}] Starting election for term {term}")
         
         # Create vote request
         vote_request = RequestVoteRequest(
@@ -275,13 +275,13 @@ class RaftNode:
                 peer_address, response = future.result()
                 
                 if response is None:
-                    safe_print(f"[{self.node_id}] No response from {peer_address}")
+                    print(f"[{self.node_id}] No response from {peer_address}")
                     continue
                 
                 with self._lock:
                     # If we discover a higher term, become follower
                     if response.term > self.current_term:
-                        safe_print(f"[{self.node_id}] Discovered higher term {response.term}, stepping down")
+                        print(f"[{self.node_id}] Discovered higher term {response.term}, stepping down")
                         self._become_follower(response.term)
                         return
                     
@@ -292,16 +292,16 @@ class RaftNode:
                     # Count vote
                     if response.vote_granted:
                         votes_received += 1
-                        safe_print(f"[{self.node_id}] Got vote from {peer_address} ({votes_received}/{votes_needed})")
+                        print(f"[{self.node_id}] Got vote from {peer_address} ({votes_received}/{votes_needed})")
                         
                         # Check if we won
                         if votes_received >= votes_needed:
-                            safe_print(f"[{self.node_id}] Won election with {votes_received} votes!")
+                            print(f"[{self.node_id}] Won election with {votes_received} votes!")
                             self._become_leader()
                             return
         
         # Didn't win election
-        safe_print(f"[{self.node_id}] Lost election (got {votes_received}/{votes_needed} votes)")
+        print(f"[{self.node_id}] Lost election (got {votes_received}/{votes_needed} votes)")
     
     def _send_heartbeats(self):
         """Send heartbeats/log entries to all followers"""
@@ -407,7 +407,7 @@ class RaftNode:
                 entry = self.log.get(n)
                 if entry and entry.term == self.current_term:
                     self.commit_index = n
-                    safe_print(f"[{self.node_id}] Advanced commit_index to {n}")
+                    print(f"[{self.node_id}] Advanced commit_index to {n}")
         
     def propose_command(self, command: Command) -> dict:
         """
@@ -497,7 +497,7 @@ class RaftNode:
             if can_vote:
                 self.voted_for = request.candidate_id
                 self.last_heartbeat = time.time()  # Reset election timer
-                safe_print(f"[{self.node_id}] Granted vote to {request.candidate_id} in term {request.term}")
+                print(f"[{self.node_id}] Granted vote to {request.candidate_id} in term {request.term}")
             
             return RequestVoteResponse(
                 term=self.current_term,
@@ -576,7 +576,7 @@ class RaftNode:
                     # New entry, append it
                     cmd = Command.from_dict(entry_data.command)
                     self.log.append(entry_data.term, cmd)
-                    safe_print(f"[{self.node_id}] Appended entry {entry_data.index} from leader")
+                    print(f"[{self.node_id}] Appended entry {entry_data.index} from leader")
                 elif existing.term != entry_data.term:
                     # Conflicting entry, delete it and all following, then append
                     self._delete_entries_from(entry_data.index)
@@ -586,7 +586,7 @@ class RaftNode:
             # Update commit index
             if request.leader_commit > self.commit_index:
                 self.commit_index = min(request.leader_commit, self.log.last_index())
-                safe_print(f"[{self.node_id}] Updated commit_index to {self.commit_index}")
+                print(f"[{self.node_id}] Updated commit_index to {self.commit_index}")
             
             return AppendEntriesResponse(
                 term=self.current_term,
