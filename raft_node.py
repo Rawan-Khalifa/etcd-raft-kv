@@ -207,6 +207,11 @@ class RaftNode:
     def _become_leader(self):
         """Transition to leader state"""
         with self._lock:
+            # Safety check - make sure we actually won
+            if self.voted_for != self.node_id:
+                print(f"[{self.node_id}] ERROR: Cannot become leader, voted for {self.voted_for}")
+                return
+            
             self.state = NodeState.LEADER
             self.leader_id = self.node_id
             
@@ -225,6 +230,9 @@ class RaftNode:
                     daemon=True
                 )
                 self._heartbeat_thread.start()
+                
+            # Send immediate heartbeat to assert authority
+            self._send_heartbeats()
     
     def _election_timer_loop(self):
         """
