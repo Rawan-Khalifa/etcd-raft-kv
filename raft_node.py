@@ -322,8 +322,14 @@ class RaftNode:
                             self._become_leader()
                             return
         
-        # Didn't win election
+        # Didn't win election - stay as candidate and try again
         print(f"[{self.node_id}] Lost election (got {votes_received}/{votes_needed} votes)")
+        
+        # ADD THIS: Reset election timeout so we don't all retry at the same time
+        with self._lock:
+            self.last_heartbeat = time.time()
+            self.election_timeout = self._random_election_timeout()
+            # Stay as CANDIDATE - we'll timeout again and retry
     
     def _send_heartbeats(self):
         """Send heartbeats/log entries to all followers"""
