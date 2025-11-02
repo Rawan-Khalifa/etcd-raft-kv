@@ -82,12 +82,11 @@ class RaftNode:
     
     def _random_election_timeout(self) -> float:
         """
-        Generate a random election timeout between 150-300ms.
+        Generate a random election timeout.
         
-        Randomization prevents split votes - different nodes
-        timeout at different times.
+        Wider range (300-600ms) reduces chance of split votes.
         """
-        return random.uniform(0.15, 0.30)
+        return random.uniform(0.3, 0.6)  # Changed from 0.15-0.30
     
     def start(self):
         """Start the Raft node"""
