@@ -37,8 +37,8 @@ def test_three_node_election():
         
         print("All nodes started, waiting for election...")
         
-        # Wait longer for election to complete
-        time.sleep(3.0)  # Increased from 2.0
+        # Wait for election to complete
+        time.sleep(3.0)
         
         # Check status of all nodes
         leaders = []
@@ -70,12 +70,27 @@ def test_three_node_election():
         assert len(leaders) == 1, f"Should have exactly 1 leader after convergence, got {len(leaders)}"
         assert len(followers) >= 1, f"Should have at least 1 follower, got {len(followers)}"
         
-        # All nodes should agree on the leader
         leader_id = leaders[0].node_id
-        for node in followers:
-            assert node.leader_id == leader_id, f"Follower {node.node_id} thinks leader is {node.leader_id}, should be {leader_id}"
+        print(f"\n✓ Leader elected: {leader_id}")
         
-        print(f"✓ Election successful! Leader is {leader_id}\n")
+        # Wait for followers to receive heartbeats and recognize leader
+        print("Waiting for followers to receive heartbeats...")
+        time.sleep(1.0)
+        
+        # Now check that all followers know who the leader is
+        for node in followers:
+            status = node.get_status()
+            print(f"{node.node_id} recognizes leader: {status.get('leader', 'none')}")
+            
+            # Give it one more chance if not set yet
+            if status.get('leader') is None:
+                time.sleep(0.5)
+                status = node.get_status()
+            
+            assert status.get('leader') == leader_id, \
+                f"Follower {node.node_id} thinks leader is {status.get('leader')}, should be {leader_id}"
+        
+        print(f"✓ All followers recognize {leader_id} as leader\n")
         
         return nodes, leaders[0]
         
