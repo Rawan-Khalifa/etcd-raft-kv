@@ -21,16 +21,7 @@ class RaftRPCClient:
         self.timeout = timeout
     
     def request_vote(self, address: str, request: RequestVoteRequest) -> Optional[RequestVoteResponse]:
-        """
-        Send RequestVote RPC to another node.
-        
-        Args:
-            address: Target node address (e.g., "http://localhost:8081")
-            request: The RequestVote request
-            
-        Returns:
-            RequestVoteResponse or None if request failed
-        """
+        """Send RequestVote RPC to another node"""
         try:
             url = f"{address}/raft/request_vote"
             response = requests.post(
@@ -42,23 +33,22 @@ class RaftRPCClient:
             if response.status_code == 200:
                 return RequestVoteResponse.from_dict(response.json())
             else:
+                print(f"[RPC] RequestVote to {address} failed with status {response.status_code}")
                 return None
                 
-        except Exception as e:
-            # Network error, timeout, etc.
+        except requests.exceptions.Timeout:
+            # Timeout - expected if node is slow or down
             return None
-    
+        except requests.exceptions.ConnectionError as e:
+            # Can't connect - node might be down or address wrong
+            print(f"[RPC] Cannot connect to {address}: {e}")
+            return None
+        except Exception as e:
+            print(f"[RPC] RequestVote error: {e}")
+            return None
+
     def append_entries(self, address: str, request: AppendEntriesRequest) -> Optional[AppendEntriesResponse]:
-        """
-        Send AppendEntries RPC to another node.
-        
-        Args:
-            address: Target node address (e.g., "http://localhost:8081")
-            request: The AppendEntries request
-            
-        Returns:
-            AppendEntriesResponse or None if request failed
-        """
+        """Send AppendEntries RPC to another node"""
         try:
             url = f"{address}/raft/append_entries"
             response = requests.post(
@@ -72,6 +62,9 @@ class RaftRPCClient:
             else:
                 return None
                 
+        except requests.exceptions.Timeout:
+            return None
+        except requests.exceptions.ConnectionError:
+            return None
         except Exception as e:
-            # Network error, timeout, etc.
             return None
