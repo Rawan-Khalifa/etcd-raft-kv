@@ -139,23 +139,39 @@ class RaftNode:
 
     def stop(self):
         """Stop the Raft node"""
+        print(f"[{self.node_id}] Stopping...")
+        
         with self._lock:
-            print(f"[{self.node_id}] Stopping...")
+            if not self._running:
+                return
             self._running = False
-            
-            # Shutdown RPC server
-            if hasattr(self, '_rpc_server'):
+        
+        # Shutdown RPC server first
+        if hasattr(self, '_rpc_server'):
+            try:
                 self._rpc_server.shutdown()
-            
-            # Wait for threads
-            if self._election_thread:
-                self._election_thread.join(timeout=1.0)
-            if self._heartbeat_thread:
-                self._heartbeat_thread.join(timeout=1.0)
-            if self._apply_thread:
-                self._apply_thread.join(timeout=1.0)
-            if self._rpc_server_thread:
-                self._rpc_server_thread.join(timeout=1.0)
+                self._rpc_server.server_close()
+            except:
+                pass
+        
+        # Give threads a moment to notice _running = False
+        time.sleep(0.2)
+        
+        # Don't wait forever for threads
+        threads_to_join = [
+            ('election', self._election_thread),
+            ('heartbeat', self._heartbeat_thread),
+            ('apply', self._apply_thread),
+            ('rpc_server', self._rpc_server_thread)
+        ]
+        
+        for name, thread in threads_to_join:
+            if thread and thread.is_alive():
+                thread.join(timeout=0.5)  # Max 0.5s per thread
+                if thread.is_alive():
+                    print(f"[{self.node_id}] Warning: {name} thread didn't stop cleanly")
+        
+        print(f"[{self.node_id}] Stopped")
         
     def _become_follower(self, term: int):
         """
