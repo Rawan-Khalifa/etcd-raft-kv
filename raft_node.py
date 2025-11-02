@@ -374,6 +374,13 @@ class RaftNode:
         This implements the core log replication mechanism.
         """
         with self._lock:
+            # Only proceed if we're still leader
+            if self.state != NodeState.LEADER:
+                return
+            
+            # Save current term to detect if it changes during RPC
+            current_term = self.current_term
+            
             # Get the next index to send to this peer
             next_idx = self.next_index.get(peer_address, 1)
             
@@ -402,7 +409,7 @@ class RaftNode:
             
             # Create request
             request = AppendEntriesRequest(
-                term=self.current_term,
+                term=current_term,
                 leader_id=self.node_id,
                 prev_log_index=prev_log_index,
                 prev_log_term=prev_log_term,
@@ -417,12 +424,18 @@ class RaftNode:
             return
         
         with self._lock:
-            # If we discover a higher term, step down
+            # If we discover a higher term, step down immediately
             if response.term > self.current_term:
+                print(f"[{self.node_id}] Discovered higher term {response.term} from {peer_address}, stepping down")
                 self._become_follower(response.term)
                 return
             
-            # Only process if we're still leader
+            # If our term changed while RPC was in flight, ignore this response
+            # (we might have stepped down and become leader again in a new term)
+            if self.current_term != current_term:
+                return
+            
+            # Only process if we're still leader in the same term
             if self.state != NodeState.LEADER:
                 return
             
@@ -435,6 +448,7 @@ class RaftNode:
                 self._advance_commit_index()
             else:
                 # Replication failed, decrement next_index and retry
+                # This handles the case where follower's log is behind
                 self.next_index[peer_address] = max(1, self.next_index[peer_address] - 1)
 
     def _advance_commit_index(self):
