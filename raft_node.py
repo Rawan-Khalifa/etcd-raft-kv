@@ -335,3 +335,135 @@ class RaftNode:
                 'last_applied': self.last_applied,
                 'peers': self.peers
             }
+    def handle_request_vote(self, request: RequestVoteRequest) -> RequestVoteResponse:
+        """
+        Handle RequestVote RPC from candidate.
+        
+        This is called when another node wants our vote in an election.
+        """
+        with self._lock:
+            # If candidate's term is older, reject
+            if request.term < self.current_term:
+                return RequestVoteResponse(
+                    term=self.current_term,
+                    vote_granted=False
+                )
+            
+            # If candidate's term is newer, become follower
+            if request.term > self.current_term:
+                self._become_follower(request.term)
+            
+            # Check if we can vote for this candidate
+            can_vote = (
+                # Haven't voted yet, or already voted for this candidate
+                (self.voted_for is None or self.voted_for == request.candidate_id) and
+                # Candidate's log is at least as up-to-date as ours
+                self._is_log_up_to_date(request.last_log_index, request.last_log_term)
+            )
+            
+            if can_vote:
+                self.voted_for = request.candidate_id
+                self.last_heartbeat = time.time()  # Reset election timer
+                safe_print(f"[{self.node_id}] Granted vote to {request.candidate_id} in term {request.term}")
+            
+            return RequestVoteResponse(
+                term=self.current_term,
+                vote_granted=can_vote
+            )
+
+    def _is_log_up_to_date(self, last_log_index: int, last_log_term: int) -> bool:
+        """
+        Check if candidate's log is at least as up-to-date as ours.
+        
+        Raft determines which of two logs is more up-to-date by comparing
+        the index and term of the last entries in the logs.
+        """
+        our_last_term = self.log.last_term()
+        our_last_index = self.log.last_index()
+        
+        # If terms differ, the log with later term is more up-to-date
+        if last_log_term != our_last_term:
+            return last_log_term > our_last_term
+        
+        # If terms are the same, the longer log is more up-to-date
+        return last_log_index >= our_last_index
+
+    def handle_append_entries(self, request: AppendEntriesRequest) -> AppendEntriesResponse:
+        """
+        Handle AppendEntries RPC from leader.
+        
+        This is used for both heartbeats and log replication.
+        """
+        with self._lock:
+            # Reply false if term < currentTerm
+            if request.term < self.current_term:
+                return AppendEntriesResponse(
+                    term=self.current_term,
+                    success=False,
+                    match_index=0
+                )
+            
+            # If we receive a message from a leader with equal or higher term,
+            # recognize it as leader and become follower
+            if request.term >= self.current_term:
+                self._become_follower(request.term)
+                self.leader_id = request.leader_id
+            
+            # Reset election timeout (we heard from leader)
+            self.last_heartbeat = time.time()
+            
+            # Check if our log contains an entry at prev_log_index with matching term
+            if request.prev_log_index > 0:
+                prev_entry = self.log.get(request.prev_log_index)
+                
+                # Log doesn't contain entry at prev_log_index
+                if prev_entry is None:
+                    return AppendEntriesResponse(
+                        term=self.current_term,
+                        success=False,
+                        match_index=0
+                    )
+                
+                # Entry exists but terms don't match
+                if prev_entry.term != request.prev_log_term:
+                    # Delete the conflicting entry and all that follow it
+                    self._delete_entries_from(request.prev_log_index)
+                    return AppendEntriesResponse(
+                        term=self.current_term,
+                        success=False,
+                        match_index=0
+                    )
+            
+            # Append any new entries not already in the log
+            for entry_data in request.entries:
+                # Check if we already have this entry
+                existing = self.log.get(entry_data.index)
+                
+                if existing is None:
+                    # New entry, append it
+                    cmd = Command.from_dict(entry_data.command)
+                    self.log.append(entry_data.term, cmd)
+                    safe_print(f"[{self.node_id}] Appended entry {entry_data.index} from leader")
+                elif existing.term != entry_data.term:
+                    # Conflicting entry, delete it and all following, then append
+                    self._delete_entries_from(entry_data.index)
+                    cmd = Command.from_dict(entry_data.command)
+                    self.log.append(entry_data.term, cmd)
+            
+            # Update commit index
+            if request.leader_commit > self.commit_index:
+                self.commit_index = min(request.leader_commit, self.log.last_index())
+                safe_print(f"[{self.node_id}] Updated commit_index to {self.commit_index}")
+            
+            return AppendEntriesResponse(
+                term=self.current_term,
+                success=True,
+                match_index=self.log.last_index()
+            )
+
+    def _delete_entries_from(self, index: int):
+        """Delete log entries from index onwards"""
+        with self._lock:
+            if index <= len(self.log._entries):
+                # Delete from index onwards (convert to 0-based)
+                self.log._entries = self.log._entries[:index - 1]
