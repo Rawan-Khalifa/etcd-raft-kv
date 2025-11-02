@@ -10,12 +10,16 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
     
     def do_POST(self):
         """Handle POST requests for RPC"""
-        if self.path == '/raft/request_vote':
-            self._handle_request_vote()
-        elif self.path == '/raft/append_entries':
-            self._handle_append_entries()
-        else:
-            self.send_error(404)
+        try:
+            if self.path == '/raft/request_vote':
+                self._handle_request_vote()
+            elif self.path == '/raft/append_entries':
+                self._handle_append_entries()
+            else:
+                self.send_error(404)
+        except (BrokenPipeError, ConnectionResetError):
+            # Client disconnected, nothing we can do
+            pass
     
     def _handle_request_vote(self):
         """Handle RequestVote RPC"""
@@ -37,8 +41,15 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(response.to_dict()).encode('utf-8'))
             
+        except (BrokenPipeError, ConnectionResetError):
+            # Client disconnected before we could respond
+            pass
         except Exception as e:
-            self.send_error(500, str(e))
+            # Try to send error, but ignore if client already disconnected
+            try:
+                self.send_error(500, str(e))
+            except (BrokenPipeError, ConnectionResetError):
+                pass
     
     def _handle_append_entries(self):
         """Handle AppendEntries RPC"""
@@ -60,12 +71,27 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(response.to_dict()).encode('utf-8'))
             
+        except (BrokenPipeError, ConnectionResetError):
+            # Client disconnected before we could respond
+            pass
         except Exception as e:
-            self.send_error(500, str(e))
+            # Try to send error, but ignore if client already disconnected
+            try:
+                self.send_error(500, str(e))
+            except (BrokenPipeError, ConnectionResetError):
+                pass
     
     def log_message(self, format, *args):
-        """Suppress default logging"""
-        pass  # Or use safe_print if you want logs
+        """Suppress default HTTP logging"""
+        pass
+
+    def handle_error(self, request, client_address):
+        """Override to suppress error printing for broken pipes"""
+        # Only log non-network errors
+        import sys
+        exc_type = sys.exc_info()[0]
+        if exc_type not in (BrokenPipeError, ConnectionResetError):
+            super().handle_error(request, client_address)
 
 def create_raft_rpc_server(raft_node, host, port):
     """
@@ -80,5 +106,15 @@ def create_raft_rpc_server(raft_node, host, port):
         HTTPServer instance
     """
     RaftRPCHandler.raft_node = raft_node
-    server = HTTPServer((host, port), RaftRPCHandler)
+    
+    # Create custom HTTPServer that suppresses BrokenPipe errors
+    class QuietHTTPServer(HTTPServer):
+        def handle_error(self, request, client_address):
+            """Suppress BrokenPipe errors"""
+            import sys
+            exc_type = sys.exc_info()[0]
+            if exc_type not in (BrokenPipeError, ConnectionResetError):
+                super().handle_error(request, client_address)
+    
+    server = QuietHTTPServer((host, port), RaftRPCHandler)
     return server
