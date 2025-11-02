@@ -571,6 +571,7 @@ class RaftNode:
             
             # Reset election timeout (we heard from leader)
             self.last_heartbeat = time.time()
+            self.election_timeout = self._random_election_timeout()   # added this
             
             # Check if our log contains an entry at prev_log_index with matching term
             if request.prev_log_index > 0:
