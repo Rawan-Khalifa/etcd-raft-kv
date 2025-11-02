@@ -240,8 +240,6 @@ class RaftNode:
     def _start_election(self):
         """
         Start an election by requesting votes from all peers.
-        
-        This is called when a node becomes a candidate.
         """
         with self._lock:
             term = self.current_term
@@ -249,22 +247,61 @@ class RaftNode:
             last_log_index = self.log.last_index()
             last_log_term = self.log.last_term()
         
-        print(f"[{self.node_id}] Starting election for term {term}")
+        safe_print(f"[{self.node_id}] Starting election for term {term}")
         
-        # In a real implementation, we'd send RequestVote RPCs to all peers
-        # For now, we'll simulate this in a single-node or multi-node setup
+        # Create vote request
+        vote_request = RequestVoteRequest(
+            term=term,
+            candidate_id=candidate_id,
+            last_log_index=last_log_index,
+            last_log_term=last_log_term
+        )
         
         # Count votes (we already voted for ourselves)
         votes_received = 1
-        votes_needed = (len(self.peers) + 1) // 2 + 1  # Majority
+        votes_needed = (len(self.peers) + 1) // 2 + 1
         
-        print(f"[{self.node_id}] Election: got {votes_received} votes, need {votes_needed}")
+        # Send RequestVote RPCs to all peers in parallel
+        import concurrent.futures
         
-        # TODO: Send RequestVote RPC to all peers and count responses
-        # For now, in single-node mode, we win immediately
-        if len(self.peers) == 0:
-            print(f"[{self.node_id}] Single-node cluster, won election!")
-            self._become_leader()
+        def request_vote_from_peer(peer_address):
+            response = self.rpc_client.request_vote(peer_address, vote_request)
+            return (peer_address, response)
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.peers)) as executor:
+            futures = [executor.submit(request_vote_from_peer, peer) for peer in self.peers]
+            
+            for future in concurrent.futures.as_completed(futures):
+                peer_address, response = future.result()
+                
+                if response is None:
+                    safe_print(f"[{self.node_id}] No response from {peer_address}")
+                    continue
+                
+                with self._lock:
+                    # If we discover a higher term, become follower
+                    if response.term > self.current_term:
+                        safe_print(f"[{self.node_id}] Discovered higher term {response.term}, stepping down")
+                        self._become_follower(response.term)
+                        return
+                    
+                    # Check if we're still a candidate (might have changed)
+                    if self.state != NodeState.CANDIDATE:
+                        return
+                    
+                    # Count vote
+                    if response.vote_granted:
+                        votes_received += 1
+                        safe_print(f"[{self.node_id}] Got vote from {peer_address} ({votes_received}/{votes_needed})")
+                        
+                        # Check if we won
+                        if votes_received >= votes_needed:
+                            safe_print(f"[{self.node_id}] Won election with {votes_received} votes!")
+                            self._become_leader()
+                            return
+        
+        # Didn't win election
+        safe_print(f"[{self.node_id}] Lost election (got {votes_received}/{votes_needed} votes)")
     
     def _send_heartbeats(self):
         """
