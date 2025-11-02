@@ -90,43 +90,65 @@ class RaftNode:
         return random.uniform(0.15, 0.30)
     
     def start(self):
-        """Start the Raft node (begin election timer and other loops)"""
+        """Start the Raft node"""
         with self._lock:
             if self._running:
                 return
             
             self._running = True
             
-            # Start election timer thread
+            # Start RPC server in background thread
+            from raft_http_server import create_raft_rpc_server
+            from urllib.parse import urlparse
+            
+            parsed = urlparse(self.address)
+            self._rpc_server = create_raft_rpc_server(
+                self,
+                parsed.hostname or 'localhost',
+                parsed.port or 8080
+            )
+            
+            self._rpc_server_thread = threading.Thread(
+                target=self._rpc_server.serve_forever,
+                daemon=True
+            )
+            self._rpc_server_thread.start()
+            
+            # Start other threads...
             self._election_thread = threading.Thread(
                 target=self._election_timer_loop,
                 daemon=True
             )
             self._election_thread.start()
             
-            # Start apply loop thread
             self._apply_thread = threading.Thread(
                 target=self._apply_loop,
                 daemon=True
             )
             self._apply_thread.start()
             
-            print(f"[{self.node_id}] Started")
-    
+            print(f"[{self.node_id}] Started on {self.address}")
+
     def stop(self):
         """Stop the Raft node"""
         with self._lock:
             print(f"[{self.node_id}] Stopping...")
             self._running = False
             
-            # Wait for threads to finish
+            # Shutdown RPC server
+            if hasattr(self, '_rpc_server'):
+                self._rpc_server.shutdown()
+            
+            # Wait for threads
             if self._election_thread:
                 self._election_thread.join(timeout=1.0)
             if self._heartbeat_thread:
                 self._heartbeat_thread.join(timeout=1.0)
             if self._apply_thread:
                 self._apply_thread.join(timeout=1.0)
-    
+            if self._rpc_server_thread:
+                self._rpc_server_thread.join(timeout=1.0)
+        
     def _become_follower(self, term: int):
         """
         Transition to follower state.
