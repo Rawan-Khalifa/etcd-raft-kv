@@ -8,6 +8,13 @@ from kvstore import KVStore
 from state_machine import StateMachine
 from command import Command
 
+from rpc import (
+    RequestVoteRequest, RequestVoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse,
+    LogEntryData
+)
+from rpc_client import RaftRPCClient
+
 class NodeState(Enum):
     """The three possible states a Raft node can be in"""
     FOLLOWER = "FOLLOWER"
@@ -23,17 +30,22 @@ class RaftNode:
     leader election and log replication.
     """
     
-    def __init__(self, node_id: str, peers: List[str]):
+    def __init__(self, node_id: str, peers: List[str], address: str):
         """
         Initialize a Raft node.
         
         Args:
             node_id: Unique identifier for this node (e.g., "node1")
-            peers: List of peer node IDs (e.g., ["node2", "node3"])
+            peers: List of peer addresses (e.g., ["http://localhost:8081", ...])
+            address: This node's address (e.g., "http://localhost:8080")
         """
         self.node_id = node_id
         self.peers = peers  # Other nodes in the cluster
-        
+        self.address = address  # This node's address
+
+        # Create RPC client
+        self.rpc_client = RaftRPCClient()
+
         # Raft state - Persistent (should be saved to disk in production)
         self.current_term = 0
         self.voted_for: Optional[str] = None  # Who we voted for in current term
