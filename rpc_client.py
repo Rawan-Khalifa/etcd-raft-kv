@@ -11,7 +11,7 @@ class RaftRPCClient:
     Client for making RPC calls to other Raft nodes.
     """
     
-    def __init__(self, timeout: float = 0.1):
+    def __init__(self, timeout: float = 0.5):
         """
         Initialize RPC client.
         
