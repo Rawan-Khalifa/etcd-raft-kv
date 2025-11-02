@@ -101,17 +101,26 @@ class RaftNode:
             from urllib.parse import urlparse
             
             parsed = urlparse(self.address)
-            self._rpc_server = create_raft_rpc_server(
-                self,
-                parsed.hostname or 'localhost',
-                parsed.port or 8080
-            )
+            host = parsed.hostname or 'localhost'
+            port = parsed.port
+
+            if port is None:
+                # If no port specified, extract from path or use default
+                print(f"[{self.node_id}] ERROR: No port in address {self.address}")
+                port = 8080
+
+            print(f"[{self.node_id}] Starting RPC server on {host}:{port}")
+            
+            self._rpc_server = create_raft_rpc_server(self, host, port)
             
             self._rpc_server_thread = threading.Thread(
                 target=self._rpc_server.serve_forever,
                 daemon=True
             )
             self._rpc_server_thread.start()
+
+            # Give server time to start
+            time.sleep(0.1)
             
             # Start other threads...
             self._election_thread = threading.Thread(
