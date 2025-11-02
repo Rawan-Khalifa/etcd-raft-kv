@@ -523,9 +523,10 @@ class RaftNode:
             
             if can_vote:
                 self.voted_for = request.candidate_id
-                self.last_heartbeat = time.time()  # Reset election timer
+                self.last_heartbeat = time.time()
+                self.election_timeout = self._random_election_timeout()  # ADDED THIS LINE
                 print(f"[{self.node_id}] Granted vote to {request.candidate_id} in term {request.term}")
-            
+        
             return RequestVoteResponse(
                 term=self.current_term,
                 vote_granted=can_vote
