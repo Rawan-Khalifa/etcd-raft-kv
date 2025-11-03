@@ -101,12 +101,13 @@ class RaftNode:
         """Start the Raft node"""
         with self._lock:
             if self._running:
+                print(f"[{self.node_id}] Already running, ignoring start()")
                 return
             
             self._running = True
             
-            # Start RPC server in background thread
-            from raft_http_server import create_raft_rpc_server
+            # Start combined RPC + HTTP API server
+            from raft_http_server import create_raft_rpc_server  # This now handles both
             from urllib.parse import urlparse
             
             parsed = urlparse(self.address)
@@ -114,37 +115,54 @@ class RaftNode:
             port = parsed.port
 
             if port is None:
-                # If no port specified, extract from path or use default
                 print(f"[{self.node_id}] ERROR: No port in address {self.address}")
                 port = 8080
 
-            print(f"[{self.node_id}] Starting RPC server on {host}:{port}")
+            print(f"[{self.node_id}] Starting combined server on {host}:{port}")
             
-            self._rpc_server = create_raft_rpc_server(self, host, port)
-            
-            self._rpc_server_thread = threading.Thread(
-                target=self._rpc_server.serve_forever,
-                daemon=True
-            )
-            self._rpc_server_thread.start()
+            try:
+                self._server = create_raft_rpc_server(self, host, port)
+                
+                self._server_thread = threading.Thread(
+                    target=self._server.serve_forever,
+                    daemon=True
+                )
+                self._server_thread.start()
 
-            # Give server time to start
-            time.sleep(0.1)
+                # Give server time to start
+                time.sleep(0.2)
+                
+                # Test if the server is listening
+                import socket
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                result = sock.connect_ex((host, port))
+                sock.close()
+                
+                if result == 0:
+                    print(f"[{self.node_id}] ✓ Server listening on {host}:{port}")
+                else:
+                    print(f"[{self.node_id}] ✗ WARNING: Server may not be listening")
             
-            # Start other threads...
-            self._election_thread = threading.Thread(
-                target=self._election_timer_loop,
-                daemon=True
-            )
-            self._election_thread.start()
-            
-            self._apply_thread = threading.Thread(
-                target=self._apply_loop,
-                daemon=True
-            )
-            self._apply_thread.start()
-            
-            print(f"[{self.node_id}] Started on {self.address}")
+            except Exception as e:
+                print(f"[{self.node_id}] ✗ ERROR starting server: {e}")
+                import traceback
+                traceback.print_exc()
+                raise
+        
+        # Start other threads...
+        self._election_thread = threading.Thread(
+            target=self._election_timer_loop,
+            daemon=True
+        )
+        self._election_thread.start()
+        
+        self._apply_thread = threading.Thread(
+            target=self._apply_loop,
+            daemon=True
+        )
+        self._apply_thread.start()
+        
+        print(f"[{self.node_id}] Started")
 
     def stop(self):
         """Stop the Raft node"""
@@ -155,14 +173,14 @@ class RaftNode:
                 return
             self._running = False
         
-        # Shutdown RPC server first
-        if hasattr(self, '_rpc_server'):
+        # Shutdown server first
+        if hasattr(self, '_server'):
             try:
-                self._rpc_server.shutdown()
-                self._rpc_server.server_close()
+                self._server.shutdown()
+                self._server.server_close()
             except:
                 pass
-        
+    
         # Give threads a moment to notice _running = False
         time.sleep(0.2)
         
@@ -171,7 +189,7 @@ class RaftNode:
             ('election', self._election_thread),
             ('heartbeat', self._heartbeat_thread),
             ('apply', self._apply_thread),
-            ('rpc_server', self._rpc_server_thread)
+            ('server', self._server_thread)
         ]
         
         for name, thread in threads_to_join:
@@ -179,7 +197,7 @@ class RaftNode:
                 thread.join(timeout=0.5)  # Max 0.5s per thread
                 if thread.is_alive():
                     print(f"[{self.node_id}] Warning: {name} thread didn't stop cleanly")
-        
+    
         print(f"[{self.node_id}] Stopped")
         
     def _become_follower(self, term: int):
@@ -586,21 +604,20 @@ class RaftNode:
         """Read operation (doesn't need consensus)"""
         return self.store.get(key)
     
-    def get_status(self) -> dict:
-        """Get node status for debugging"""
+    def get_status(self):
+        """Get current node status for monitoring"""
         with self._lock:
             return {
                 'node_id': self.node_id,
                 'state': self.state.value,
                 'term': self.current_term,
-                'leader': self.leader_id,
-                'log_size': len(self.log),
+                'voted_for': self.voted_for,
+                'leader_id': self.leader_id,
+                'log_size': self.log.last_index(),
                 'commit_index': self.commit_index,
                 'last_applied': self.last_applied,
-                'peers': self.peers
+                'peers': list(self.peers) if self.peers else []
             }
-        print(f"[{self.node_id}] get_status called: state={self.state.value}, leader_id={self.leader_id}")
-        return status
         
     def handle_request_vote(self, request: RequestVoteRequest) -> RequestVoteResponse:
         """Handle RequestVote RPC from candidate"""
