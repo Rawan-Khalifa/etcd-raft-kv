@@ -21,6 +21,22 @@ python demo_visualizer.py
 ./stop_cluster.sh
 ```
 
+## Project Structure
+```
+├── kvstore.py              # Thread-safe in-memory key-value store
+├── command.py              # Command abstraction (PUT/GET/DELETE)
+├── log.py                  # Replicated log for storing commands
+├── state_machine.py        # Applies commands to KV store
+├── raft_node.py            # Core Raft implementation (leader election, log replication)
+├── rpc.py                  # RPC message definitions
+├── rpc_client.py           # HTTP-based RPC client
+├── raft_http_server.py     # RPC server for inter-node communication
+├── coordinator.py          # High-level interface (optional wrapper)
+├── http_server.py          # initial HTTP server (no longer needed given the raft-http-server)
+├── start_node{1,2,3}.py    # Individual node starter scripts
+└── demo_visualizer.py      # Real-time cluster state monitor
+```
+
 ## Development Journey
 
 1. **Thread-safe KV Store** - Dictionary-based storage with Get/Put/Delete
