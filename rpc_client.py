@@ -60,11 +60,16 @@ class RaftRPCClient:
             if response.status_code == 200:
                 return AppendEntriesResponse.from_dict(response.json())
             else:
+                print(f"[RPC] AppendEntries to {address} failed with status {response.status_code}")
                 return None
                 
         except requests.exceptions.Timeout:
+            # Timeout - log occasionally
             return None
-        except requests.exceptions.ConnectionError:
+        except requests.exceptions.ConnectionError as e:
+            # Can't connect - THIS IS THE LIKELY CULPRIT
+            print(f"[RPC] Cannot connect to {address} for AppendEntries: {e}")
             return None
         except Exception as e:
+            print(f"[RPC] AppendEntries error to {address}: {e}")
             return None

@@ -96,25 +96,87 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
 def create_raft_rpc_server(raft_node, host, port):
     """
     Create an HTTP server for Raft RPC.
-    
-    Args:
-        raft_node: The RaftNode instance
-        host: Host to bind to
-        port: Port to listen on
-        
-    Returns:
-        HTTPServer instance
     """
-    RaftRPCHandler.raft_node = raft_node
+    # Create a NEW handler class for each server with its own node
+    class NodeSpecificHandler(RaftRPCHandler):
+        # Override with this specific node
+        node_instance = raft_node
     
-    # Create custom HTTPServer that suppresses BrokenPipe errors
+    # Use the node_instance instead of raft_node in handlers
+    class RaftRPCHandlerForNode(BaseHTTPRequestHandler):
+        """HTTP handler for Raft RPC endpoints"""
+        
+        def do_POST(self):
+            """Handle POST requests for RPC"""
+            try:
+                if self.path == '/raft/request_vote':
+                    self._handle_request_vote()
+                elif self.path == '/raft/append_entries':
+                    self._handle_append_entries()
+                else:
+                    self.send_error(404)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        
+        def _handle_request_vote(self):
+            """Handle RequestVote RPC"""
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(content_length).decode('utf-8')
+                data = json.loads(body)
+                
+                request = RequestVoteRequest.from_dict(data)
+                response = raft_node.handle_request_vote(request)  # Use the passed-in raft_node
+                
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(response.to_dict()).encode('utf-8'))
+                
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception as e:
+                try:
+                    self.send_error(500, str(e))
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+        
+        def _handle_append_entries(self):
+            """Handle AppendEntries RPC"""
+            print(f"[{raft_node.node_id}] <<< RECEIVED AppendEntries (handler)", flush=True)
+            
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(content_length).decode('utf-8')
+                data = json.loads(body)
+                
+                request = AppendEntriesRequest.from_dict(data)
+                response = raft_node.handle_append_entries(request)  # Use the passed-in raft_node
+                
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(response.to_dict()).encode('utf-8'))
+                
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception as e:
+                try:
+                    self.send_error(500, str(e))
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+        
+        def log_message(self, format, *args):
+            """Suppress default HTTP logging"""
+            pass
+    
+    # Create server with this specific handler
     class QuietHTTPServer(HTTPServer):
         def handle_error(self, request, client_address):
-            """Suppress BrokenPipe errors"""
             import sys
             exc_type = sys.exc_info()[0]
             if exc_type not in (BrokenPipeError, ConnectionResetError):
                 super().handle_error(request, client_address)
     
-    server = QuietHTTPServer((host, port), RaftRPCHandler)
+    server = QuietHTTPServer((host, port), RaftRPCHandlerForNode)
     return server
