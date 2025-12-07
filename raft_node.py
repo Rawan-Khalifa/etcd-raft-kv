@@ -32,15 +32,16 @@ class RaftNode:
     leader election and log replication.
     """
     
-    def __init__(self, node_id: str, peers: List[str], address: str, enable_persistence=True):
+    def __init__(self, node_id: str, peers: List[str], address: str, enable_persistence=True, snapshot_interval=100):
         """
-        Initialize a Raft node.
+        Initialize a Raft node with snapshot support.
         
         Args:
             node_id: Unique identifier for this node (e.g., "node1")
             peers: List of peer addresses (e.g., ["http://localhost:8081", ...])
             address: This node's address (e.g., "http://localhost:8080")
             enable_persistence: Whether to persist state to disk
+            snapshot_interval: Create snapshot every N log entries
         """
         self.node_id = node_id
         self.peers = peers  # Other nodes in the cluster
@@ -56,7 +57,12 @@ class RaftNode:
 
         # Persistence - Initialize BEFORE loading state
         self.enable_persistence = enable_persistence
-        self.wal = WriteAheadLog(node_id) if enable_persistence else None
+        self.wal = WriteAheadLog(node_id, snapshot_interval=snapshot_interval) if enable_persistence else None
+
+        # Snapshot tracking
+        self.snapshot_interval = snapshot_interval
+        self.last_snapshot_index = 0
+        self.last_snapshot_term = 0
     
         # Raft state - Persistent (load from disk if available)
         self.current_term = 0
@@ -78,7 +84,7 @@ class RaftNode:
             for entry in log_entries:
                 cmd = Command.from_dict(entry['command'])
                 self.log.append(entry['term'], cmd)
-    
+
         # Raft state - Volatile (on all servers)
         self.commit_index = 0  # Highest log entry known to be committed
         self.last_applied = 0  # Highest log entry applied to state machine
@@ -95,6 +101,20 @@ class RaftNode:
         self.store = KVStore()
         self.state_machine = StateMachine(self.store, self.log)
         
+        # Load snapshot state if available (MUST be after KVStore creation)
+        if self.wal:
+            snapshot_state = self.wal.load_snapshot()
+            if snapshot_state:
+                print(f"[{self.node_id}] Restoring KV store from snapshot ({len(snapshot_state)} keys)")
+                self.store._data = snapshot_state
+                
+                # Get snapshot metadata
+                snap_info = self.wal.get_snapshot_info()
+                self.last_snapshot_index = snap_info['last_snapshot_index']
+                self.last_snapshot_term = snap_info['last_snapshot_term']
+                
+                print(f"[{self.node_id}] Restored from snapshot at index {self.last_snapshot_index}")
+        
         # Timing
         self.last_heartbeat = time.time()
         self.election_timeout = self._random_election_timeout()
@@ -106,7 +126,7 @@ class RaftNode:
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._apply_thread: Optional[threading.Thread] = None
 
-        print(f"[{self.node_id}] Initialized - log_size={self.log.last_index()}, term={self.current_term}")
+        print(f"[{self.node_id}] Initialized - log_size={self.log.last_index()}, term={self.current_term}, snapshot_index={self.last_snapshot_index}")
 
 
     def _random_election_timeout(self) -> float:
@@ -356,10 +376,15 @@ class RaftNode:
         
         print(f"[{self.node_id}] Heartbeat loop exiting - node stopping")
     
+    # Updated to trigger snapshots
     def _apply_loop(self):
         """
         Background thread that applies committed entries to state machine.
+        Also triggers periodic snapshots.
         """
+        snapshot_check_interval = 0.5  # Check every 500ms
+        last_snapshot_check = time.time()
+        
         while self._running:
             time.sleep(0.01)
             
@@ -373,6 +398,66 @@ class RaftNode:
                             self.state_machine.apply_command(entry.command)
                             self.last_applied = i
                             print(f"[{self.node_id}] Applied entry {i}: {entry.command}")
+                
+                # Periodically check if we should snapshot
+                current_time = time.time()
+                if current_time - last_snapshot_check >= snapshot_check_interval:
+                    last_snapshot_check = current_time
+                    
+                    # Check if enough entries since last snapshot
+                    if self.wal and self.wal.snapshot_manager.should_snapshot(self.log.last_index()):
+                        self._create_snapshot()
+
+    # Add new method for snapshot creation:
+    def _create_snapshot(self):
+        """Create a snapshot of current state and compact log"""
+        with self._lock:
+            if not self.wal:
+                return
+            
+            try:
+                # Only snapshot if we have applied entries beyond last snapshot
+                if self.last_applied <= self.last_snapshot_index:
+                    return
+                
+                # Get current state
+                log_index = self.last_applied  # Snapshot includes all applied entries
+                
+                # Get the term of the entry we're snapshotting
+                entry = self.log.get(log_index)
+                if not entry:
+                    print(f"[{self.node_id}] Cannot snapshot - entry {log_index} not found")
+                    return
+                
+                log_term = entry.term
+
+                # Get KV store state
+                store_state = dict(self.store._data)
+                
+                # Create snapshot
+                success = self.wal.create_snapshot(log_index, log_term, store_state)
+                
+                if success:
+                    # Update our tracking
+                    self.last_snapshot_index = log_index
+                    self.last_snapshot_term = log_term
+                    
+                    # Now we can discard log entries before this snapshot
+                    # Keep a few entries for safety (in case of edge cases)
+                    min_keep_index = max(1, log_index - 10)
+                    self.wal.truncate_log(min_keep_index)
+                    
+                    # Clean up old snapshots (keep only 3 most recent)
+                    self.wal.snapshot_manager.cleanup_old_snapshots(keep_count=3)
+                    
+                    print(f"[{self.node_id}] Snapshot created at index {log_index}")
+                    print(f"[{self.node_id}]   Log now starts at index {min_keep_index}")
+                    print(f"[{self.node_id}]   Snapshot contains {len(store_state)} keys")
+                    
+            except Exception as e:
+                print(f"[{self.node_id}] ERROR creating snapshot: {e}")
+                import traceback
+                traceback.print_exc()
     
     def _start_election(self, term: int = None):
         """Start an election by requesting votes from all peers"""
@@ -680,9 +765,14 @@ class RaftNode:
         """Read operation (doesn't need consensus)"""
         return self.store.get(key)
     
+    # Update get_status to include snapshot info:
     def get_status(self):
         """Get current node status for monitoring"""
         with self._lock:
+            snapshot_info = {}
+            if self.wal:
+                snapshot_info = self.wal.get_snapshot_info()
+            
             return {
                 'node_id': self.node_id,
                 'state': self.state.value,
@@ -692,7 +782,8 @@ class RaftNode:
                 'log_size': self.log.last_index(),
                 'commit_index': self.commit_index,
                 'last_applied': self.last_applied,
-                'peers': list(self.peers) if self.peers else []
+                'peers': list(self.peers) if self.peers else [],
+                'snapshot': snapshot_info  # Add snapshot info
             }
         
     def handle_request_vote(self, request: RequestVoteRequest) -> RequestVoteResponse:
