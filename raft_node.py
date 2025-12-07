@@ -8,6 +8,7 @@ from log import Log
 from kvstore import KVStore
 from state_machine import StateMachine
 from command import Command
+from wal import WriteAheadLog
 
 from rpc import (
     RequestVoteRequest, RequestVoteResponse,
@@ -31,7 +32,7 @@ class RaftNode:
     leader election and log replication.
     """
     
-    def __init__(self, node_id: str, peers: List[str], address: str):
+    def __init__(self, node_id: str, peers: List[str], address: str, enable_persistence=True):
         """
         Initialize a Raft node.
         
@@ -39,6 +40,7 @@ class RaftNode:
             node_id: Unique identifier for this node (e.g., "node1")
             peers: List of peer addresses (e.g., ["http://localhost:8081", ...])
             address: This node's address (e.g., "http://localhost:8080")
+            enable_persistence: Whether to persist state to disk
         """
         self.node_id = node_id
         self.peers = peers  # Other nodes in the cluster
@@ -52,11 +54,31 @@ class RaftNode:
         # Create RPC client
         self.rpc_client = RaftRPCClient()
 
-        # Raft state - Persistent (should be saved to disk in production)
+        # Persistence - Initialize BEFORE loading state
+        self.enable_persistence = enable_persistence
+        self.wal = WriteAheadLog(node_id) if enable_persistence else None
+    
+        # Raft state - Persistent (load from disk if available)
         self.current_term = 0
         self.voted_for: Optional[str] = None  # Who we voted for in current term
         self.log = Log()
         
+        # Load persistent state from disk BEFORE creating log
+        if self.wal:
+            persistent_state = self.wal.load_persistent_state()
+            self.current_term = persistent_state.current_term
+            self.voted_for = persistent_state.voted_for
+            
+            print(f"[{self.node_id}] Recovered persistent state: term={self.current_term}, voted_for={self.voted_for}")
+            
+            # Recover log entries from disk
+            log_entries = self.wal.get_all_entries()
+            print(f"[{self.node_id}] Recovering {len(log_entries)} log entries from disk")
+            
+            for entry in log_entries:
+                cmd = Command.from_dict(entry['command'])
+                self.log.append(entry['term'], cmd)
+    
         # Raft state - Volatile (on all servers)
         self.commit_index = 0  # Highest log entry known to be committed
         self.last_applied = 0  # Highest log entry applied to state machine
@@ -83,9 +105,10 @@ class RaftNode:
         self._election_thread: Optional[threading.Thread] = None
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._apply_thread: Optional[threading.Thread] = None
-        
-        print(f"[{self.node_id}] Initialized as FOLLOWER in term 0")
-    
+
+        print(f"[{self.node_id}] Initialized - log_size={self.log.last_index()}, term={self.current_term}")
+
+
     def _random_election_timeout(self) -> float:
         """
         Generate a random election timeout.
@@ -98,7 +121,7 @@ class RaftNode:
         return random.uniform(0.2, 1.5)  # Back to 300-600ms but ensure proper randomization
 
     def start(self):
-        """Start the Raft node"""
+        """Start the Raft node with recovery"""
         with self._lock:
             if self._running:
                 print(f"[{self.node_id}] Already running, ignoring start()")
@@ -106,8 +129,17 @@ class RaftNode:
             
             self._running = True
             
+            # Recover log from disk if not already done in __init__
+            if self.wal and self.log.last_index() == 0:
+                entries = self.wal.get_all_entries()
+                print(f"[{self.node_id}] Recovering {len(entries)} log entries from disk")
+                
+                for entry in entries:
+                    cmd = Command.from_dict(entry['command'])
+                    self.log.append(entry['term'], cmd)
+        
             # Start combined RPC + HTTP API server
-            from raft_http_server import create_raft_rpc_server  # This now handles both
+            from raft_http_server import create_raft_rpc_server
             from urllib.parse import urlparse
             
             parsed = urlparse(self.address)
@@ -148,7 +180,7 @@ class RaftNode:
                 import traceback
                 traceback.print_exc()
                 raise
-        
+    
         # Start other threads...
         self._election_thread = threading.Thread(
             target=self._election_timer_loop,
@@ -203,6 +235,9 @@ class RaftNode:
     def _become_follower(self, term: int):
         """Transition to follower state"""
         with self._lock:
+            old_state = self.state
+            old_term = self.current_term
+            
             self.state = NodeState.FOLLOWER
             self.current_term = term
             self.voted_for = None
@@ -210,8 +245,14 @@ class RaftNode:
             self.last_heartbeat = time.time()
             self.election_timeout = self._random_election_timeout()
             
-            print(f"[{self.node_id}] Became FOLLOWER in term {term}")
+            # Persist state to disk
+            if self.wal:
+                self.wal.save_persistent_state(self.current_term, self.voted_for)
             
+            if old_state != NodeState.FOLLOWER or old_term != term:
+                print(f"[{self.node_id}] Became FOLLOWER in term {term}")
+            
+
     def _become_candidate(self):
         """Transition to candidate state and start election"""
         with self._lock:
@@ -221,11 +262,16 @@ class RaftNode:
             self.last_heartbeat = time.time()
             self.election_timeout = self._random_election_timeout()
             
-            print(f"[{self.node_id}] Became CANDIDATE in term {self.current_term}")
+            # Persist vote to disk BEFORE starting election
+            if self.wal:
+                self.wal.save_persistent_state(self.current_term, self.voted_for)
             
-            # Start election
-            self._start_election()
+            print(f"[{self.node_id}] Became CANDIDATE in term {self.current_term}")
     
+        # Start election outside the lock
+        self._start_election()
+
+
     def _become_leader(self):
         """Transition to leader state"""
         with self._lock:
@@ -328,14 +374,22 @@ class RaftNode:
                             self.last_applied = i
                             print(f"[{self.node_id}] Applied entry {i}: {entry.command}")
     
-    def _start_election(self):
+    def _start_election(self, term: int = None):
         """Start an election by requesting votes from all peers"""
         with self._lock:
-            term = self.current_term
+            # Use provided term or current term
+            if term is None:
+                term = self.current_term
+            
+            # Verify we're still in this term and still a candidate
+            if self.current_term != term or self.state != NodeState.CANDIDATE:
+                print(f"[{self.node_id}] Election aborted - term changed or not candidate anymore")
+                return
+            
             candidate_id = self.node_id
             last_log_index = self.log.last_index()
             last_log_term = self.log.last_term()
-        
+    
         print(f"[{self.node_id}] Starting election for term {term}")
         
         # Create vote request
@@ -347,28 +401,45 @@ class RaftNode:
         )
         
         # Count votes
-        votes_received = 1
-        votes_needed = (len(self.peers) + 1) // 2 + 1
+        votes_received = 1  # Vote for ourselves
+        votes_needed = (len(self.peers) // 2) + 1  # Majority needed
+        
+        print(f"[{self.node_id}] Need {votes_needed} votes from {len(self.peers)} peers")
+        
+        # If no peers, we're the only node - become leader immediately
+        if len(self.peers) == 0:
+            print(f"[{self.node_id}] No peers - single node cluster, becoming leader immediately")
+            with self._lock:
+                self._become_leader()
+            return
         
         # Send RequestVote RPCs to all peers in parallel
         import concurrent.futures
         
         def request_vote_from_peer(peer_address):
-            response = self.rpc_client.request_vote(peer_address, vote_request)
-            return (peer_address, response)
+            try:
+                response = self.rpc_client.request_vote(peer_address, vote_request)
+                return (peer_address, response)
+            except Exception as e:
+                print(f"[{self.node_id}] Exception requesting vote from {peer_address}: {e}")
+                return (peer_address, None)
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.peers)) as executor:
             futures = [executor.submit(request_vote_from_peer, peer) for peer in self.peers]
             
             for future in concurrent.futures.as_completed(futures):
-                peer_address, response = future.result()
+                try:
+                    peer_address, response = future.result()
+                except Exception as e:
+                    print(f"[{self.node_id}] Error in election: {e}")
+                    continue
                 
                 if response is None:
                     print(f"[{self.node_id}] No response from {peer_address}")
                     continue
                 
                 with self._lock:
-                    # If we discover a higher term, become follower
+                    # If we discover a higher term, become follower immediately
                     if response.term > self.current_term:
                         print(f"[{self.node_id}] Discovered higher term {response.term}, stepping down")
                         self._become_follower(response.term)
@@ -390,14 +461,15 @@ class RaftNode:
                             self._become_leader()
                             print(f"[{self.node_id}] Leader transition complete. State is now {self.state.value}")
                             return
-        
+    
         # Didn't win election
         print(f"[{self.node_id}] Lost election (got {votes_received}/{votes_needed} votes)")
         
         with self._lock:
+            # Reset for next election attempt
             self.last_heartbeat = time.time()
             self.election_timeout = self._random_election_timeout()
-            
+    
     def _send_heartbeats(self):
         """Send heartbeats/log entries to all followers"""
         with self._lock:
@@ -579,27 +651,31 @@ class RaftNode:
                     'leader': self.leader_id
                 }
             
-            # Append to our log
+            # Append to log in memory
             entry = self.log.append(self.current_term, command)
+            
+            # Persist to disk BEFORE replicating
+            if self.wal:
+                if not self.wal.append_entry(entry.index, entry.term, command):
+                    print(f"[{self.node_id}] ERROR: Failed to persist log entry {entry.index}")
+                    return {
+                        'success': False,
+                        'error': 'Failed to persist to disk'
+                    }
+            
             print(f"[{self.node_id}] Proposed {command} at index {entry.index}")
             
-            # TODO: Replicate to followers
-            # For single-node, immediately commit
+            # For single-node clusters, immediately commit
             if len(self.peers) == 0:
                 self.commit_index = entry.index
-                return {
-                    'success': True,
-                    'index': entry.index,
-                    'term': entry.term
-                }
-            
-            # For multi-node, would wait for replication
+                print(f"[{self.node_id}] Single-node cluster: immediately committed entry {entry.index}")
+        
             return {
                 'success': True,
                 'index': entry.index,
                 'term': entry.term
             }
-    
+
     def get(self, key: str):
         """Read operation (doesn't need consensus)"""
         return self.store.get(key)
@@ -620,7 +696,7 @@ class RaftNode:
             }
         
     def handle_request_vote(self, request: RequestVoteRequest) -> RequestVoteResponse:
-        """Handle RequestVote RPC from candidate"""
+        """Handle RequestVote RPC from candidate with persistence"""
         with self._lock:
             # If candidate's term is older, reject
             if request.term < self.current_term:
@@ -649,14 +725,17 @@ class RaftNode:
             )
             
             if can_vote:
-                # Only print if this is a NEW vote
                 if self.voted_for != request.candidate_id:
                     print(f"[{self.node_id}] Granted vote to {request.candidate_id} in term {request.term}")
                 
                 self.voted_for = request.candidate_id
                 self.last_heartbeat = time.time()
                 self.election_timeout = self._random_election_timeout()
-            
+                
+                # Persist vote to disk
+                if self.wal:
+                    self.wal.save_persistent_state(self.current_term, self.voted_for)
+        
             return RequestVoteResponse(
                 term=self.current_term,
                 vote_granted=can_vote
@@ -680,13 +759,12 @@ class RaftNode:
         return last_log_index >= our_last_index
 
     def handle_append_entries(self, request: AppendEntriesRequest) -> AppendEntriesResponse:
-        """Handle AppendEntries RPC from leader"""
+        """Handle AppendEntries RPC from leader with persistence"""
         
         import sys
         sys.stdout.flush()
         print(f"[{self.node_id}] <<< RECEIVED AppendEntries from {request.leader_id} (term={request.term})", flush=True)
         
-        # Log occasionally
         if not hasattr(self, '_ae_count'):
             self._ae_count = 0
         self._ae_count += 1
@@ -712,10 +790,7 @@ class RaftNode:
                     self._become_follower(request.term)
             
             # CRITICAL: ALWAYS set leader_id when receiving valid AppendEntries
-            # This must happen regardless of which branch above executed
             self.leader_id = request.leader_id
-            
-            # Reset election timeout
             self.last_heartbeat = time.time()
             self.election_timeout = self._random_election_timeout()
             
@@ -745,20 +820,40 @@ class RaftNode:
                 if existing is None:
                     cmd = Command.from_dict(entry_data.command)
                     self.log.append(entry_data.term, cmd)
+                    
+                    # Persist to WAL
+                    if self.wal:
+                        self.wal.append_entry(entry_data.index, entry_data.term, cmd)
+                    
+                    print(f"[{self.node_id}] Appended entry {entry_data.index}: {cmd}")
+                    
                 elif existing.term != entry_data.term:
                     self._delete_entries_from(entry_data.index)
+                    # Delete from WAL
+                    if self.wal:
+                        self.wal.delete_entries_from(entry_data.index)
+                    
                     cmd = Command.from_dict(entry_data.command)
                     self.log.append(entry_data.term, cmd)
-            
+                    
+                    # Persist to WAL
+                    if self.wal:
+                        self.wal.append_entry(entry_data.index, entry_data.term, cmd)
+                    
+                    print(f"[{self.node_id}] Replaced entry {entry_data.index}: {cmd}")
+        
             # Update commit index
             if request.leader_commit > self.commit_index:
+                old_commit = self.commit_index
                 self.commit_index = min(request.leader_commit, self.log.last_index())
-            
-            return AppendEntriesResponse(
-                term=self.current_term,
-                success=True,
-                match_index=self.log.last_index()
-            )
+                print(f"[{self.node_id}] Updated commit_index: {old_commit} -> {self.commit_index}")
+        
+        return AppendEntriesResponse(
+            term=self.current_term,
+            success=True,
+            match_index=self.log.last_index()
+        )
+
 
     def _delete_entries_from(self, index: int):
         """Delete log entries from index onwards"""
