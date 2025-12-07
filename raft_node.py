@@ -267,10 +267,9 @@ class RaftNode:
                 self.wal.save_persistent_state(self.current_term, self.voted_for)
             
             print(f"[{self.node_id}] Became CANDIDATE in term {self.current_term}")
-            current_term = self.current_term
     
         # Start election outside the lock
-        self._start_election(current_term)
+        self._start_election()
 
 
     def _become_leader(self):
@@ -375,14 +374,22 @@ class RaftNode:
                             self.last_applied = i
                             print(f"[{self.node_id}] Applied entry {i}: {entry.command}")
     
-    def _start_election(self):
+    def _start_election(self, term: int = None):
         """Start an election by requesting votes from all peers"""
         with self._lock:
-            term = self.current_term
+            # Use provided term or current term
+            if term is None:
+                term = self.current_term
+            
+            # Verify we're still in this term and still a candidate
+            if self.current_term != term or self.state != NodeState.CANDIDATE:
+                print(f"[{self.node_id}] Election aborted - term changed or not candidate anymore")
+                return
+            
             candidate_id = self.node_id
             last_log_index = self.log.last_index()
             last_log_term = self.log.last_term()
-        
+    
         print(f"[{self.node_id}] Starting election for term {term}")
         
         # Create vote request
@@ -394,28 +401,45 @@ class RaftNode:
         )
         
         # Count votes
-        votes_received = 1
-        votes_needed = (len(self.peers) + 1) // 2 + 1
+        votes_received = 1  # Vote for ourselves
+        votes_needed = (len(self.peers) // 2) + 1  # Majority needed
+        
+        print(f"[{self.node_id}] Need {votes_needed} votes from {len(self.peers)} peers")
+        
+        # If no peers, we're the only node - become leader immediately
+        if len(self.peers) == 0:
+            print(f"[{self.node_id}] No peers - single node cluster, becoming leader immediately")
+            with self._lock:
+                self._become_leader()
+            return
         
         # Send RequestVote RPCs to all peers in parallel
         import concurrent.futures
         
         def request_vote_from_peer(peer_address):
-            response = self.rpc_client.request_vote(peer_address, vote_request)
-            return (peer_address, response)
+            try:
+                response = self.rpc_client.request_vote(peer_address, vote_request)
+                return (peer_address, response)
+            except Exception as e:
+                print(f"[{self.node_id}] Exception requesting vote from {peer_address}: {e}")
+                return (peer_address, None)
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.peers)) as executor:
             futures = [executor.submit(request_vote_from_peer, peer) for peer in self.peers]
             
             for future in concurrent.futures.as_completed(futures):
-                peer_address, response = future.result()
+                try:
+                    peer_address, response = future.result()
+                except Exception as e:
+                    print(f"[{self.node_id}] Error in election: {e}")
+                    continue
                 
                 if response is None:
                     print(f"[{self.node_id}] No response from {peer_address}")
                     continue
                 
                 with self._lock:
-                    # If we discover a higher term, become follower
+                    # If we discover a higher term, become follower immediately
                     if response.term > self.current_term:
                         print(f"[{self.node_id}] Discovered higher term {response.term}, stepping down")
                         self._become_follower(response.term)
@@ -437,14 +461,15 @@ class RaftNode:
                             self._become_leader()
                             print(f"[{self.node_id}] Leader transition complete. State is now {self.state.value}")
                             return
-        
+    
         # Didn't win election
         print(f"[{self.node_id}] Lost election (got {votes_received}/{votes_needed} votes)")
         
         with self._lock:
+            # Reset for next election attempt
             self.last_heartbeat = time.time()
             self.election_timeout = self._random_election_timeout()
-            
+    
     def _send_heartbeats(self):
         """Send heartbeats/log entries to all followers"""
         with self._lock:
