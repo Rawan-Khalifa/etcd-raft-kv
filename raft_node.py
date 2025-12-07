@@ -8,6 +8,7 @@ from log import Log
 from kvstore import KVStore
 from state_machine import StateMachine
 from command import Command
+from wal import WriteAheadLog
 
 from rpc import (
     RequestVoteRequest, RequestVoteResponse,
@@ -31,7 +32,7 @@ class RaftNode:
     leader election and log replication.
     """
     
-    def __init__(self, node_id: str, peers: List[str], address: str):
+    def __init__(self, node_id: str, peers: List[str], address: str, enable_persistence=True):
         """
         Initialize a Raft node.
         
@@ -83,6 +84,18 @@ class RaftNode:
         self._election_thread: Optional[threading.Thread] = None
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._apply_thread: Optional[threading.Thread] = None
+
+        # Persistence
+        self.enable_persistence = enable_persistence
+        self.wal = WriteAheadLog(node_id) if enable_persistence else None
+    
+        # Load persistent state from disk
+        if self.wal:
+            persistent_state = self.wal.load_persistent_state()
+            self.current_term = persistent_state.current_term
+            self.voted_for = persistent_state.voted_for
+            
+            print(f"[{self.node_id}] Recovered: term={self.current_term}, voted_for={self.voted_for}")
         
         print(f"[{self.node_id}] Initialized as FOLLOWER in term 0")
     
