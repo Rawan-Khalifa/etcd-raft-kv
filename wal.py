@@ -9,6 +9,7 @@ from pathlib import Path
 from dataclasses import dataclass, asdict
 from command import Command, CommandType
 from log import LogEntry
+from snapshot import SnapshotManager
 
 @dataclass
 class RaftPersistentState:
@@ -24,23 +25,20 @@ class RaftPersistentState:
         return cls(**data)
 
 class WriteAheadLog:
-    """
-    Persistent Write-Ahead Log for Raft
-    - Stores log entries to disk
-    - Stores persistent state (term, voted_for)
-    - Provides crash recovery
-    """
+    """Write-Ahead Log with snapshot support"""
     
-    def __init__(self, node_id, data_dir="./raft_data"):
+    def __init__(self, node_id, data_dir="./raft_data", snapshot_interval=100):
         self.node_id = node_id
         self.data_dir = Path(data_dir) / node_id
         self.data_dir.mkdir(parents=True, exist_ok=True)
         
         self.log_file = self.data_dir / "log.json"
         self.state_file = self.data_dir / "state.json"
-        self.snapshot_file = self.data_dir / "snapshot.json"
         
         self._lock = threading.Lock()
+        
+        # Initialize snapshot manager
+        self.snapshot_manager = SnapshotManager(node_id, data_dir, snapshot_interval)
         
         print(f"[{self.node_id}] WAL initialized at {self.data_dir}")
     
@@ -192,3 +190,35 @@ class WriteAheadLog:
             if file.exists():
                 total += file.stat().st_size
         return total
+    
+    def get_snapshot_info(self):
+        """Get snapshot information"""
+        return self.snapshot_manager.get_snapshot_info()
+    
+    def create_snapshot(self, log_index: int, log_term: int, kv_store_state: dict):
+        """Create a snapshot and return whether log should be truncated"""
+        return self.snapshot_manager.create_snapshot(log_index, log_term, kv_store_state)
+    
+    def load_snapshot(self):
+        """Load KV store state from latest snapshot"""
+        return self.snapshot_manager.load_latest_snapshot()
+    
+    def truncate_log(self, index: int) -> bool:
+        """Delete log entries up to (not including) the given index"""
+        with self._lock:
+            try:
+                entries = self._load_log_entries()
+                
+                # Keep only entries at or after index
+                entries = [e for e in entries if e['index'] >= index]
+                
+                # Write back
+                with open(self.log_file, 'w') as f:
+                    json.dump(entries, f)
+                
+                print(f"[{self.node_id}] Truncated log: keeping entries from index {index}")
+                return True
+                
+            except Exception as e:
+                print(f"[{self.node_id}] ERROR truncating log: {e}")
+                return False
