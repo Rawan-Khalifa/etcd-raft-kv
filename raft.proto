@@ -1,0 +1,125 @@
+syntax = "proto3";
+
+package raft;
+
+// Command types for state machine operations
+enum CommandType {
+  PUT = 0;
+  DELETE = 1;
+}
+
+// A single state machine command (PUT or DELETE)
+message Command {
+  CommandType type = 1;
+  string key = 2;
+  string value = 3;  // empty for DELETE
+}
+
+// A log entry with index, term, and command
+message LogEntry {
+  int64 index = 1;
+  int64 term = 2;
+  Command command = 3;
+}
+
+// RequestVote RPC - sent by candidates during elections
+message RequestVoteRequest {
+  int64 term = 1;              // Candidate's term
+  string candidate_id = 2;     // Candidate requesting vote
+  int64 last_log_index = 3;    // Index of candidate's last log entry
+  int64 last_log_term = 4;     // Term of candidate's last log entry
+}
+
+message RequestVoteResponse {
+  int64 term = 1;              // Current term
+  bool vote_granted = 2;       // True if candidate received vote
+}
+
+// AppendEntries RPC - sent by leader to replicate log and/or heartbeat
+message AppendEntriesRequest {
+  int64 term = 1;              // Leader's term
+  string leader_id = 2;        // So follower can redirect clients
+  int64 prev_log_index = 3;    // Index immediately preceding new ones
+  int64 prev_log_term = 4;     // Term of prev_log_index entry
+  repeated LogEntry entries = 5;  // Log entries to store
+  int64 leader_commit = 6;     // Leader's commit_index
+}
+
+message AppendEntriesResponse {
+  int64 term = 1;              // Current term
+  bool success = 2;            // True if follower had matching prev_log
+  int64 match_index = 3;       // For leader to update match_index
+}
+
+// KV Store operations
+message GetRequest {
+  string key = 1;
+}
+
+message GetResponse {
+  bool found = 1;
+  string value = 2;
+}
+
+message PutRequest {
+  string key = 1;
+  string value = 2;
+}
+
+message PutResponse {
+  bool success = 1;
+  string leader_hint = 2;  // Redirect to leader if not leader
+}
+
+message DeleteRequest {
+  string key = 1;
+}
+
+message DeleteResponse {
+  bool success = 1;
+  string leader_hint = 2;
+}
+
+message RangeRequest {
+  string start = 1;
+  string end = 2;
+}
+
+message RangeResponse {
+  repeated RangeItem items = 1;
+}
+
+message RangeItem {
+  string key = 1;
+  string value = 2;
+}
+
+// Status request/response
+message StatusRequest {}
+
+message StatusResponse {
+  string node_id = 1;
+  string state = 2;          // LEADER, FOLLOWER, CANDIDATE
+  int64 current_term = 3;
+  int64 commit_index = 4;
+  int64 last_applied = 5;
+  int64 log_length = 6;
+  string voted_for = 7;
+  int64 last_snapshot_index = 8;
+  int64 last_snapshot_term = 9;
+}
+
+// Raft RPC Service
+service RaftRPC {
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+}
+
+// KV Store Service
+service KVStore {
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc Range(RangeRequest) returns (RangeResponse);
+  rpc Status(StatusRequest) returns (StatusResponse);
+}

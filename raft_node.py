@@ -15,7 +15,7 @@ from rpc import (
     AppendEntriesRequest, AppendEntriesResponse,
     LogEntryData
 )
-from rpc_client import RaftRPCClient
+from raft_grpc_client import RaftGRPCClient
 
 class NodeState(Enum):
     """The three possible states a Raft node can be in"""
@@ -52,8 +52,8 @@ class RaftNode:
         seed = int(hashlib.md5(f"{node_id}{address}{time.time()}".encode()).hexdigest()[:8], 16)
         self._random = random.Random(seed)
 
-        # Create RPC client
-        self.rpc_client = RaftRPCClient()
+        # Create gRPC client
+        self.rpc_client = RaftGRPCClient()
 
         # Persistence - Initialize BEFORE loading state
         self.enable_persistence = enable_persistence
@@ -125,6 +125,7 @@ class RaftNode:
         self._election_thread: Optional[threading.Thread] = None
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._apply_thread: Optional[threading.Thread] = None
+        self._server_thread: Optional[threading.Thread] = None
 
         print(f"[{self.node_id}] Initialized - log_size={self.log.last_index()}, term={self.current_term}, snapshot_index={self.last_snapshot_index}")
 
@@ -158,45 +159,72 @@ class RaftNode:
                     cmd = Command.from_dict(entry['command'])
                     self.log.append(entry['term'], cmd)
         
-            # Start combined RPC + HTTP API server
+            # Start BOTH gRPC (for inter-node Raft RPC on port 9001-9003)
+            # AND HTTP (for client APIs on port 9010-9012)
+            from raft_grpc_server import create_grpc_server
             from raft_http_server import create_raft_rpc_server
-            from urllib.parse import urlparse
-            
-            parsed = urlparse(self.address)
-            host = parsed.hostname or 'localhost'
-            port = parsed.port
 
-            if port is None:
-                print(f"[{self.node_id}] ERROR: No port in address {self.address}")
-                port = 8080
+            # Extract host and port from address
+            # Address format: "localhost:9001" or "127.0.0.1:9001"
+            if ':' in self.address:
+                host, port_str = self.address.rsplit(':', 1)
+                try:
+                    grpc_port = int(port_str)
+                    http_port = grpc_port + 9  # 9001 -> 9010, 9002 -> 9011, 9003 -> 9012
+                except ValueError:
+                    print(f"[{self.node_id}] ERROR: Invalid port in address {self.address}")
+                    grpc_port = 9001
+                    http_port = 9010
+            else:
+                host = self.address
+                grpc_port = 9001
+                http_port = 9010
 
-            print(f"[{self.node_id}] Starting combined server on {host}:{port}")
-            
+            print(f"[{self.node_id}] Starting gRPC server on {host}:{grpc_port} (Raft inter-node RPC)")
+            print(f"[{self.node_id}] Starting HTTP server on {host}:{http_port} (client APIs)")
+
             try:
-                self._server = create_raft_rpc_server(self, host, port)
+                # Start gRPC server for inter-node Raft RPC communication
+                grpc_server = create_grpc_server(self, host, grpc_port)
+                self._grpc_server = grpc_server
+                print(f"[{self.node_id}] ✓ gRPC server started on port {grpc_port}")
+                
+                # Start HTTP server for client APIs (/status, /kv/*)
+                http_server = create_raft_rpc_server(self, host, http_port)
+                self._server = http_server
                 
                 self._server_thread = threading.Thread(
                     target=self._server.serve_forever,
                     daemon=True
                 )
                 self._server_thread.start()
-
-                # Give server time to start
+                
+                # Give servers time to start
                 time.sleep(0.2)
                 
-                # Test if the server is listening
+                # Test if servers are listening
                 import socket
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                result = sock.connect_ex((host, port))
-                sock.close()
                 
+                # Test gRPC
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                result = sock.connect_ex((host, grpc_port))
+                sock.close()
                 if result == 0:
-                    print(f"[{self.node_id}] ✓ Server listening on {host}:{port}")
+                    print(f"[{self.node_id}] ✓ gRPC server listening on {host}:{grpc_port}")
                 else:
-                    print(f"[{self.node_id}] ✗ WARNING: Server may not be listening")
-            
+                    print(f"[{self.node_id}] ✗ WARNING: gRPC server may not be listening")
+                
+                # Test HTTP
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                result = sock.connect_ex((host, http_port))
+                sock.close()
+                if result == 0:
+                    print(f"[{self.node_id}] ✓ HTTP server listening on {host}:{http_port}")
+                else:
+                    print(f"[{self.node_id}] ✗ WARNING: HTTP server may not be listening")
+
             except Exception as e:
-                print(f"[{self.node_id}] ✗ ERROR starting server: {e}")
+                print(f"[{self.node_id}] ✗ ERROR starting servers: {e}")
                 import traceback
                 traceback.print_exc()
                 raise
@@ -216,6 +244,12 @@ class RaftNode:
         
         print(f"[{self.node_id}] Started")
 
+    def _get_port_from_address(self) -> int:
+        """Extract port number from address string"""
+        # address format: "localhost:9001" or "127.0.0.1:9001"
+        parts = self.address.split(':')
+        return int(parts[-1])
+    
     def stop(self):
         """Stop the Raft node"""
         print(f"[{self.node_id}] Stopping...")
@@ -225,14 +259,23 @@ class RaftNode:
                 return
             self._running = False
         
-        # Shutdown server first
+        # Shutdown gRPC server
+        if hasattr(self, '_grpc_server'):
+            try:
+                self._grpc_server.stop(grace=2)
+                print(f"[{self.node_id}] gRPC server stopped")
+            except Exception as e:
+                print(f"[{self.node_id}] Error stopping gRPC server: {e}")
+        
+        # Shutdown HTTP server
         if hasattr(self, '_server'):
             try:
                 self._server.shutdown()
                 self._server.server_close()
-            except:
-                pass
-    
+                print(f"[{self.node_id}] HTTP server stopped")
+            except Exception as e:
+                print(f"[{self.node_id}] Error stopping HTTP server: {e}")
+
         # Give threads a moment to notice _running = False
         time.sleep(0.2)
         
@@ -246,12 +289,12 @@ class RaftNode:
         
         for name, thread in threads_to_join:
             if thread and thread.is_alive():
-                thread.join(timeout=0.5)  # Max 0.5s per thread
+                thread.join(timeout=0.5)
                 if thread.is_alive():
                     print(f"[{self.node_id}] Warning: {name} thread didn't stop cleanly")
-    
-        print(f"[{self.node_id}] Stopped")
         
+        print(f"[{self.node_id}] Stopped")
+   
     def _become_follower(self, term: int):
         """Transition to follower state"""
         with self._lock:
@@ -655,7 +698,7 @@ class RaftNode:
             if not hasattr(self, f'_fail_count_{peer_address}'):
                 setattr(self, f'_fail_count_{peer_address}', 0)
             fail_count = getattr(self, f'_fail_count_{peer_address}')
-            if fail_count % 5 == 0:  # Log every 5th failure
+            if fail_count % 5 == 0:
                 print(f"[{self.node_id}] Failed to replicate to {peer_address} ({fail_count} failures)")
             setattr(self, f'_fail_count_{peer_address}', fail_count + 1)
             return False
