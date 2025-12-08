@@ -125,6 +125,7 @@ class RaftNode:
         self._election_thread: Optional[threading.Thread] = None
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._apply_thread: Optional[threading.Thread] = None
+        self._server_thread: Optional[threading.Thread] = None
 
         print(f"[{self.node_id}] Initialized - log_size={self.log.last_index()}, term={self.current_term}, snapshot_index={self.last_snapshot_index}")
 
@@ -176,11 +177,13 @@ class RaftNode:
                 grpc_server = create_grpc_server(self, 'localhost', self._get_port_from_address())
                 self._grpc_server = grpc_server
                 
-                self._server_thread = threading.Thread(
-                    target=self._server.serve_forever,
-                    daemon=True
-                )
-                self._server_thread.start()
+                # gRPC server is already started by create_grpc_server()
+                # No need for a separate server thread
+                #self._server_thread = threading.Thread(
+                #    target=self._server.serve_forever,
+                #    daemon=True
+                #)
+                #self._server_thread.start()
 
                 # Give server time to start
                 time.sleep(0.2)
