@@ -241,13 +241,23 @@ class RaftNode:
                 return
             self._running = False
         
-        # Shutdown server first
+        # Shutdown gRPC server
         if hasattr(self, '_grpc_server'):
             try:
                 self._grpc_server.stop(grace=2)
-            except:
-                pass
-    
+                print(f"[{self.node_id}] gRPC server stopped")
+            except Exception as e:
+                print(f"[{self.node_id}] Error stopping gRPC server: {e}")
+        
+        # Shutdown HTTP server
+        if hasattr(self, '_server'):
+            try:
+                self._server.shutdown()
+                self._server.server_close()
+                print(f"[{self.node_id}] HTTP server stopped")
+            except Exception as e:
+                print(f"[{self.node_id}] Error stopping HTTP server: {e}")
+
         # Give threads a moment to notice _running = False
         time.sleep(0.2)
         
@@ -261,12 +271,12 @@ class RaftNode:
         
         for name, thread in threads_to_join:
             if thread and thread.is_alive():
-                thread.join(timeout=0.5)  # Max 0.5s per thread
+                thread.join(timeout=0.5)
                 if thread.is_alive():
                     print(f"[{self.node_id}] Warning: {name} thread didn't stop cleanly")
-    
-        print(f"[{self.node_id}] Stopped")
         
+        print(f"[{self.node_id}] Stopped")
+   
     def _become_follower(self, term: int):
         """Transition to follower state"""
         with self._lock:
