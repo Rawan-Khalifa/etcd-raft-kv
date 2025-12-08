@@ -159,8 +159,9 @@ class RaftNode:
                     cmd = Command.from_dict(entry['command'])
                     self.log.append(entry['term'], cmd)
         
-            # Updated: Start combined gRPC + HTTP API server
+            # Start BOTH gRPC (for inter-node Raft) and HTTP (for client APIs)
             from raft_grpc_server import create_grpc_server
+            from raft_http_server import create_raft_rpc_server
             from urllib.parse import urlparse
             
             parsed = urlparse(self.address)
@@ -171,36 +172,41 @@ class RaftNode:
                 print(f"[{self.node_id}] ERROR: No port in address {self.address}")
                 port = 8080
 
-            print(f"[{self.node_id}] Starting combined server on {host}:{port}")
+            print(f"[{self.node_id}] Starting gRPC server on {host}:{port}")
             
             try:
+                # Start gRPC server for inter-node Raft RPC
                 grpc_server = create_grpc_server(self, 'localhost', self._get_port_from_address())
                 self._grpc_server = grpc_server
+                print(f"[{self.node_id}] ✓ gRPC server started (Raft RPC)")
                 
-                # gRPC server is already started by create_grpc_server()
-                # No need for a separate server thread
-                #self._server_thread = threading.Thread(
-                #    target=self._server.serve_forever,
-                #    daemon=True
-                #)
-                #self._server_thread.start()
-
+                # ALSO start HTTP server for client APIs (/status, /kv/*)
+                print(f"[{self.node_id}] Starting HTTP server for client APIs...")
+                http_server = create_raft_rpc_server(self, host, port)
+                self._server = http_server
+                
+                self._server_thread = threading.Thread(
+                    target=self._server.serve_forever,
+                    daemon=True
+                )
+                self._server_thread.start()
+                
                 # Give server time to start
                 time.sleep(0.2)
                 
-                # Test if the server is listening
+                # Test if the HTTP server is listening
                 import socket
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 result = sock.connect_ex((host, port))
                 sock.close()
                 
                 if result == 0:
-                    print(f"[{self.node_id}] ✓ Server listening on {host}:{port}")
+                    print(f"[{self.node_id}] ✓ HTTP server listening on {host}:{port}")
                 else:
-                    print(f"[{self.node_id}] ✗ WARNING: Server may not be listening")
-            
+                    print(f"[{self.node_id}] ✗ WARNING: HTTP server may not be listening")
+
             except Exception as e:
-                print(f"[{self.node_id}] ✗ ERROR starting server: {e}")
+                print(f"[{self.node_id}] ✗ ERROR starting servers: {e}")
                 import traceback
                 traceback.print_exc()
                 raise
