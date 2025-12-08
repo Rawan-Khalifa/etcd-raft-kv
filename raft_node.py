@@ -15,7 +15,7 @@ from rpc import (
     AppendEntriesRequest, AppendEntriesResponse,
     LogEntryData
 )
-from rpc_client import RaftRPCClient
+from raft_grpc_client import RaftGRPCClient
 
 class NodeState(Enum):
     """The three possible states a Raft node can be in"""
@@ -52,8 +52,8 @@ class RaftNode:
         seed = int(hashlib.md5(f"{node_id}{address}{time.time()}".encode()).hexdigest()[:8], 16)
         self._random = random.Random(seed)
 
-        # Create RPC client
-        self.rpc_client = RaftRPCClient()
+        # Create gRPC client
+        self.rpc_client = RaftGRPCClient()
 
         # Persistence - Initialize BEFORE loading state
         self.enable_persistence = enable_persistence
@@ -158,8 +158,8 @@ class RaftNode:
                     cmd = Command.from_dict(entry['command'])
                     self.log.append(entry['term'], cmd)
         
-            # Start combined RPC + HTTP API server
-            from raft_http_server import create_raft_rpc_server
+            # Updated: Start combined gRPC + HTTP API server
+            from raft_grpc_server import create_grpc_server
             from urllib.parse import urlparse
             
             parsed = urlparse(self.address)
@@ -173,7 +173,8 @@ class RaftNode:
             print(f"[{self.node_id}] Starting combined server on {host}:{port}")
             
             try:
-                self._server = create_raft_rpc_server(self, host, port)
+                grpc_server = create_grpc_server(self, 'localhost', self._get_port_from_address())
+                self._grpc_server = grpc_server
                 
                 self._server_thread = threading.Thread(
                     target=self._server.serve_forever,
@@ -216,6 +217,12 @@ class RaftNode:
         
         print(f"[{self.node_id}] Started")
 
+    def _get_port_from_address(self) -> int:
+        """Extract port number from address string"""
+        # address format: "localhost:9001" or "127.0.0.1:9001"
+        parts = self.address.split(':')
+        return int(parts[-1])
+    
     def stop(self):
         """Stop the Raft node"""
         print(f"[{self.node_id}] Stopping...")
@@ -226,10 +233,9 @@ class RaftNode:
             self._running = False
         
         # Shutdown server first
-        if hasattr(self, '_server'):
+        if hasattr(self, '_grpc_server'):
             try:
-                self._server.shutdown()
-                self._server.server_close()
+                self._grpc_server.stop(grace=2)
             except:
                 pass
     
