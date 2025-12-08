@@ -1,25 +1,38 @@
 #!/usr/bin/env python3
-from raft_node import RaftNode
+"""Start node3 with gRPC transport"""
+import sys
 import time
-
+from raft_node import RaftNode
 
 if __name__ == "__main__":
+    peers = [
+        "localhost:9001",  # node1
+        "localhost:9002",  # node2
+    ]
+    
     node = RaftNode(
-        'node3',
-        ['http://localhost:9001', 'http://localhost:9002'],
-        'http://localhost:9003'
+        node_id='node3',
+        peers=peers,
+        address='localhost:9003',
+        enable_persistence=True,
+        snapshot_interval=100
     )
-
-    print("Starting node3...")
-
+    
+    print("Starting node3 with gRPC...")
+    print("  gRPC server: localhost:9003")
+    print("  Peers: " + ", ".join(peers))
+    print()
+    
     node.start()
-
+    
     print("✓ Node3 started and running...")
+    print()
     
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\nStopping node3...")
+        print("\nShutting down node3...")
         node.stop()
         print("Node3 stopped.")
+        sys.exit(0)
