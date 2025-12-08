@@ -20,8 +20,9 @@ if __name__ == "__main__":
     )
     
     print("Starting node1 with gRPC...")
-    print("  gRPC server: localhost:9001")
-    print("  Peers: " + ", ".join(peers))
+    print("  gRPC server: localhost:9001 (inter-node Raft RPC)")
+    print("  HTTP server: localhost:9010 (client APIs)")
+    print("  Peers: localhost:9002, localhost:9003")
     print()
     
     node.start()

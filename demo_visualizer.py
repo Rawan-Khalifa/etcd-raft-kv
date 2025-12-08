@@ -152,14 +152,19 @@ class ClusterVisualizer:
 
 if __name__ == "__main__":
     nodes = [
-        "http://localhost:9001",
-        "http://localhost:9002",
-        "http://localhost:9003"
+        "http://localhost:9010",  # node1 HTTP API
+        "http://localhost:9011",  # node2 HTTP API
+        "http://localhost:9012"   # node3 HTTP API
     ]
     
     print("Starting cluster visualizer...")
     print("Make sure your cluster is running with:")
     print("  ./start_cluster.sh")
+    print()
+    print("Node Ports:")
+    print("  Node1: gRPC=9001, HTTP=9010")
+    print("  Node2: gRPC=9002, HTTP=9011")
+    print("  Node3: gRPC=9003, HTTP=9012")
     print()
     
     visualizer = ClusterVisualizer(nodes)
