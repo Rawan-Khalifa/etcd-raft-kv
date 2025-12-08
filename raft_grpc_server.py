@@ -1,160 +1,212 @@
 """
-gRPC client for Raft RPC communication.
+gRPC server for Raft consensus and KV store operations.
 
-Replaces HTTP/JSON requests with binary gRPC for better performance.
+Replaces HTTP/JSON with gRPC for 5-10x faster binary serialization,
+HTTP/2 multiplexing, and production-grade RPC communication.
 """
 import logging
 import grpc
+from concurrent import futures
 from typing import Optional
 import raft_pb2
 import raft_pb2_grpc
+from command import Command, CommandType
 from rpc import (
     RequestVoteRequest, RequestVoteResponse,
     AppendEntriesRequest, AppendEntriesResponse,
     LogEntryData
 )
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class RaftGRPCClient:
-    """Client for making gRPC RPC calls to other Raft nodes"""
+class RaftRPCServicer(raft_pb2_grpc.RaftRPCServicer):
+    """Implementation of Raft RPC service"""
     
-    def __init__(self, timeout: float = 0.5):
-        """
-        Initialize gRPC client.
-        
-        Args:
-            timeout: Request timeout in seconds
-        """
-        self.timeout = timeout
-        self._channels = {}  # Cache channels per address
-        self._stubs = {}     # Cache stubs per address
+    def __init__(self, raft_node):
+        self.raft_node = raft_node
     
-    def _get_channel(self, address: str) -> Optional[grpc.Channel]:
-        """Get or create gRPC channel to address"""
+    def RequestVote(self, request: raft_pb2.RequestVoteRequest, context: grpc.ServicerContext) -> raft_pb2.RequestVoteResponse:
+        """Handle RequestVote RPC"""
         try:
-            if address not in self._channels:
-                # Remove http:// or https:// prefix if present
-                target = address.replace('http://', '').replace('https://', '')
-                self._channels[address] = grpc.aio.secure_channel(
-                    target, grpc.ssl_channel_credentials()
-                ) if address.startswith('https://') else grpc.aio.insecure_channel(target)
-            return self._channels[address]
-        except Exception as e:
-            logger.error(f"Failed to create channel to {address}: {e}")
-            return None
-    
-    def request_vote(self, address: str, request: RequestVoteRequest) -> Optional[RequestVoteResponse]:
-        """Send RequestVote RPC to another node via gRPC"""
-        try:
-            # Convert to proto
-            proto_request = raft_pb2.RequestVoteRequest(
+            internal_request = RequestVoteRequest(
                 term=request.term,
                 candidate_id=request.candidate_id,
                 last_log_index=request.last_log_index,
                 last_log_term=request.last_log_term
             )
             
-            # Create stub if needed
-            target = address.replace('http://', '').replace('https://', '')
-            try:
-                channel = grpc.insecure_channel(
-                    target,
-                    options=[
-                        ('grpc.keepalive_time_ms', 10000),
-                        ('grpc.keepalive_timeout_ms', 5000),
-                    ]
-                )
-                stub = raft_pb2_grpc.RaftRPCStub(channel)
-                
-                # Make call with timeout
-                proto_response = stub.RequestVote(
-                    proto_request,
-                    timeout=self.timeout
-                )
-                
-                # Convert back to internal format
-                return RequestVoteResponse(
-                    term=proto_response.term,
-                    vote_granted=proto_response.vote_granted
-                )
-            finally:
-                channel.close()
-        except grpc.RpcError as e:
-            if e.code() != grpc.StatusCode.DEADLINE_EXCEEDED:
-                logger.debug(f"RequestVote RPC error to {address}: {e}")
-            return None
+            internal_response = self.raft_node.handle_request_vote(internal_request)
+            
+            return raft_pb2.RequestVoteResponse(
+                term=internal_response.term,
+                vote_granted=internal_response.vote_granted
+            )
         except Exception as e:
-            logger.debug(f"RequestVote error to {address}: {e}")
-            return None
+            logger.error(f"RequestVote error: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return raft_pb2.RequestVoteResponse()
     
-    def append_entries(self, address: str, request: AppendEntriesRequest) -> Optional[AppendEntriesResponse]:
-        """Send AppendEntries RPC to another node via gRPC"""
+    def AppendEntries(self, request: raft_pb2.AppendEntriesRequest, context: grpc.ServicerContext) -> raft_pb2.AppendEntriesResponse:
+        """Handle AppendEntries RPC"""
         try:
-            # Convert entries to proto
-            proto_entries = []
+            entries = []
             for entry in request.entries:
-                cmd = entry.command  # Already a dict
-                proto_entries.append(raft_pb2.LogEntry(
+                cmd = Command.from_dict({
+                    'type': raft_pb2.CommandType.Name(entry.command.type),
+                    'key': entry.command.key,
+                    'value': entry.command.value if entry.command.value else None
+                })
+                entries.append(LogEntryData(
                     index=entry.index,
                     term=entry.term,
-                    command=raft_pb2.Command(
-                        type=raft_pb2.CommandType.Value(cmd['type']),
-                        key=cmd['key'],
-                        value=cmd.get('value', '')
-                    )
+                    command=cmd.to_dict()
                 ))
             
-            # Convert to proto
-            proto_request = raft_pb2.AppendEntriesRequest(
+            internal_request = AppendEntriesRequest(
                 term=request.term,
                 leader_id=request.leader_id,
                 prev_log_index=request.prev_log_index,
                 prev_log_term=request.prev_log_term,
-                entries=proto_entries,
+                entries=entries,
                 leader_commit=request.leader_commit
             )
             
-            # Create stub if needed
-            target = address.replace('http://', '').replace('https://', '')
-            try:
-                channel = grpc.insecure_channel(
-                    target,
-                    options=[
-                        ('grpc.keepalive_time_ms', 10000),
-                        ('grpc.keepalive_timeout_ms', 5000),
-                    ]
-                )
-                stub = raft_pb2_grpc.RaftRPCStub(channel)
-                
-                # Make call with timeout
-                proto_response = stub.AppendEntries(
-                    proto_request,
-                    timeout=self.timeout
-                )
-                
-                # Convert back to internal format
-                return AppendEntriesResponse(
-                    term=proto_response.term,
-                    success=proto_response.success,
-                    match_index=proto_response.match_index
-                )
-            finally:
-                channel.close()
-        except grpc.RpcError as e:
-            if e.code() != grpc.StatusCode.DEADLINE_EXCEEDED:
-                logger.debug(f"AppendEntries RPC error to {address}: {e}")
-            return None
+            internal_response = self.raft_node.handle_append_entries(internal_request)
+            
+            return raft_pb2.AppendEntriesResponse(
+                term=internal_response.term,
+                success=internal_response.success,
+                match_index=internal_response.match_index
+            )
         except Exception as e:
-            logger.debug(f"AppendEntries error to {address}: {e}")
-            return None
+            logger.error(f"AppendEntries error: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return raft_pb2.AppendEntriesResponse()
+
+
+class KVStoreServicer(raft_pb2_grpc.KVStoreServicer):
+    """Implementation of KV Store service"""
     
-    def close(self):
-        """Close all channels"""
-        for channel in self._channels.values():
-            try:
-                channel.close()
-            except:
-                pass
-        self._channels.clear()
-        self._stubs.clear()
+    def __init__(self, raft_node):
+        self.raft_node = raft_node
+    
+    def Get(self, request: raft_pb2.GetRequest, context: grpc.ServicerContext) -> raft_pb2.GetResponse:
+        """Handle Get request"""
+        try:
+            value = self.raft_node.state_machine.get(request.key)
+            if value is None:
+                return raft_pb2.GetResponse(found=False)
+            return raft_pb2.GetResponse(found=True, value=str(value))
+        except Exception as e:
+            logger.error(f"Get error: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return raft_pb2.GetResponse(found=False)
+    
+    def Put(self, request: raft_pb2.PutRequest, context: grpc.ServicerContext) -> raft_pb2.PutResponse:
+        """Handle Put request"""
+        try:
+            if not self.raft_node.is_leader():
+                leader = self.raft_node.leader_id or "unknown"
+                return raft_pb2.PutResponse(success=False, leader_hint=leader)
+            
+            cmd = Command(CommandType.PUT, request.key, request.value)
+            success = self.raft_node.replicate_command(cmd)
+            
+            return raft_pb2.PutResponse(success=success, leader_hint="")
+        except Exception as e:
+            logger.error(f"Put error: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return raft_pb2.PutResponse(success=False)
+    
+    def Delete(self, request: raft_pb2.DeleteRequest, context: grpc.ServicerContext) -> raft_pb2.DeleteResponse:
+        """Handle Delete request"""
+        try:
+            if not self.raft_node.is_leader():
+                leader = self.raft_node.leader_id or "unknown"
+                return raft_pb2.DeleteResponse(success=False, leader_hint=leader)
+            
+            cmd = Command(CommandType.DELETE, request.key)
+            success = self.raft_node.replicate_command(cmd)
+            
+            return raft_pb2.DeleteResponse(success=success, leader_hint="")
+        except Exception as e:
+            logger.error(f"Delete error: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return raft_pb2.DeleteResponse(success=False)
+    
+    def Range(self, request: raft_pb2.RangeRequest, context: grpc.ServicerContext) -> raft_pb2.RangeResponse:
+        """Handle Range query"""
+        try:
+            items = []
+            for key, value in self.raft_node.state_machine.range_query(request.start, request.end):
+                items.append(raft_pb2.RangeItem(key=key, value=str(value)))
+            
+            return raft_pb2.RangeResponse(items=items)
+        except Exception as e:
+            logger.error(f"Range error: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return raft_pb2.RangeResponse()
+    
+    def Status(self, request: raft_pb2.StatusRequest, context: grpc.ServicerContext) -> raft_pb2.StatusResponse:
+        """Handle Status request"""
+        try:
+            status = self.raft_node.get_status()
+            return raft_pb2.StatusResponse(
+                node_id=status['node_id'],
+                state=status['state'],
+                current_term=status['current_term'],
+                commit_index=status['commit_index'],
+                last_applied=status['last_applied'],
+                log_length=status['log_length'],
+                voted_for=status.get('voted_for', ''),
+                last_snapshot_index=status.get('last_snapshot_index', 0),
+                last_snapshot_term=status.get('last_snapshot_term', 0)
+            )
+        except Exception as e:
+            logger.error(f"Status error: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return raft_pb2.StatusResponse()
+
+
+def create_grpc_server(raft_node, host: str, port: int):
+    """
+    Create and start gRPC server.
+    
+    Args:
+        raft_node: The RaftNode instance
+        host: Host to bind to (e.g., 'localhost')
+        port: Port to listen on
+    
+    Returns:
+        grpc.Server instance
+    """
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=10),
+        options=[
+            ('grpc.max_send_message_length', -1),
+            ('grpc.max_receive_message_length', -1),
+        ]
+    )
+    
+    raft_pb2_grpc.add_RaftRPCServicer_to_server(
+        RaftRPCServicer(raft_node),
+        server
+    )
+    raft_pb2_grpc.add_KVStoreServicer_to_server(
+        KVStoreServicer(raft_node),
+        server
+    )
+    
+    server.add_insecure_port(f'{host}:{port}')
+    logger.info(f"Starting gRPC server on {host}:{port}")
+    server.start()
+    
+    return server
