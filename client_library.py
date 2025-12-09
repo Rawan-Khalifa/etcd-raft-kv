@@ -52,7 +52,7 @@ class RaftClient:
         """Discover current leader by querying all known peers"""
         self.discovery_attempts += 1
         
-        for peer in self.known_peers:
+        for peer in list(self.known_peers):
             try:
                 response = requests.get(
                     f"{peer}/status",
@@ -216,7 +216,7 @@ class RaftClient:
     
     def get_status(self) -> Dict[str, Any]:
         """Get cluster status"""
-        for peer in self.known_peers:
+        for peer in list(self.known_peers):
             try:
                 response = requests.get(
                     f"{peer}/status",
