@@ -1,22 +1,31 @@
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
 from rpc import RequestVoteRequest, AppendEntriesRequest
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from command import Command, CommandType
+from lease import LeaseManager, ReadCache
 
 class RaftRPCHandler(BaseHTTPRequestHandler):
     """HTTP handler for Raft RPC endpoints"""
     
-    # Class variable - the RaftNode instance
+    # Class variables - the RaftNode instance and optional features
     raft_node = None
+    lease_manager = None
+    read_cache = None
     
     def do_POST(self):
-        """Handle POST requests for RPC"""
+        """Handle POST requests for RPC and write operations"""
         try:
-            if self.path == '/raft/request_vote':
+            path = urlparse(self.path).path
+            
+            if path == '/raft/request_vote':
                 self._handle_request_vote()
-            elif self.path == '/raft/append_entries':
+            elif path == '/raft/append_entries':
                 self._handle_append_entries()
+            elif path == '/membership/add':
+                self._handle_add_member()
+            elif path == '/membership/remove':
+                self._handle_remove_member()
             else:
                 self.send_error(404)
         except (BrokenPipeError, ConnectionResetError):
@@ -44,10 +53,8 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(response.to_dict()).encode('utf-8'))
             
         except (BrokenPipeError, ConnectionResetError):
-            # Client disconnected before we could respond
             pass
         except Exception as e:
-            # Try to send error, but ignore if client already disconnected
             try:
                 self.send_error(500, str(e))
             except (BrokenPipeError, ConnectionResetError):
@@ -67,6 +74,10 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
             # Handle it
             response = self.raft_node.handle_append_entries(request)
             
+            # LEASE REFRESH: On valid AppendEntries from leader, refresh lease
+            if self.lease_manager and response.success:
+                self.lease_manager.refresh_lease(request.leader_id)
+            
             # Send response
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -74,10 +85,8 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(response.to_dict()).encode('utf-8'))
             
         except (BrokenPipeError, ConnectionResetError):
-            # Client disconnected before we could respond
             pass
         except Exception as e:
-            # Try to send error, but ignore if client already disconnected
             try:
                 self.send_error(500, str(e))
             except (BrokenPipeError, ConnectionResetError):
@@ -89,23 +98,23 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
 
     def handle_error(self, request, client_address):
         """Override to suppress error printing for broken pipes"""
-        # Only log non-network errors
         import sys
         exc_type = sys.exc_info()[0]
         if exc_type not in (BrokenPipeError, ConnectionResetError):
             super().handle_error(request, client_address)
 
-# ADD THESE METHODS TO HANDLE HTTP API ENDPOINTS
     def do_GET(self):
         """Handle GET requests for HTTP API"""
         path = urlparse(self.path).path
         
         if path == '/status':
             self._handle_status()
-        elif path.startswith('/kv/'):
-            self._handle_get()
         elif path == '/metrics':
             self._handle_metrics()
+        elif path == '/membership/list':
+            self._handle_list_members()
+        elif path.startswith('/kv/'):
+            self._handle_get()
         else:
             self.send_error(404)
     
@@ -142,25 +151,18 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
         """Get node status"""
         try:
             status = self.raft_node.get_status()
+            
+            # Add lease info if available
+            if self.lease_manager:
+                status['lease'] = {
+                    'valid': self.lease_manager.is_lease_valid(),
+                    'leader_id': self.lease_manager.leader_id
+                }
+            
             self._send_json(status)
         except Exception as e:
             self._send_json({'error': str(e)}, 500)
     
-    def _handle_get(self):
-        """Get value for key"""
-        path = urlparse(self.path).path
-        key = path[4:]  # Remove '/kv/' prefix
-        
-        try:
-            value = self.raft_node.get(key)
-            
-            if value is None:
-                self._send_json({'error': 'Key not found'}, 404)
-            else:
-                self._send_json({'key': key, 'value': value})
-        except Exception as e:
-            self._send_json({'error': str(e)}, 500)
-
     def _handle_metrics(self):
         """Get Prometheus metrics"""
         try:
@@ -172,8 +174,57 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send_json({'error': str(e)}, 500)
     
+    def _handle_get(self):
+        """
+        Get value for key with lease-based read optimization.
+        
+        Fast path: If on a follower with valid leader lease, serve from cache/memory
+        without consensus (10x faster but eventually consistent)
+        
+        Slow path: If on leader or no valid lease, serve from committed state (consistent)
+        """
+        path = urlparse(self.path).path
+        key = path[4:]  # Remove '/kv/' prefix
+        
+        try:
+            # Determine if we should serve from lease (fast but eventual consistency)
+            use_lease = False
+            if self.lease_manager and self.read_cache:
+                node_state = self.raft_node.state.value
+                if self.lease_manager.can_serve_read(node_state):
+                    use_lease = True
+                    # Try cache first
+                    cached = self.read_cache.get(key)
+                    if cached is not None:
+                        return self._send_json({
+                            'key': key,
+                            'value': cached,
+                            'from_cache': True,
+                            'consistency': 'eventual'
+                        })
+            
+            # Get value from state machine (always consistent)
+            value = self.raft_node.get(key)
+            
+            if value is None:
+                self._send_json({'error': 'Key not found'}, 404)
+            else:
+                # Cache the read if using lease
+                if use_lease and self.read_cache:
+                    self.read_cache.put(key, value)
+                
+                response = {
+                    'key': key,
+                    'value': value,
+                    'from_cache': False,
+                    'consistency': 'eventual' if use_lease else 'strong'
+                }
+                self._send_json(response)
+        except Exception as e:
+            self._send_json({'error': str(e)}, 500)
+    
     def _handle_put(self):
-        """Put key-value pair"""
+        """Put key-value pair (always requires consensus)"""
         path = urlparse(self.path).path
         key = path[4:]  # Remove '/kv/' prefix
         
@@ -188,11 +239,15 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
                 self._send_json({'error': 'Missing "value" in request body'}, 400)
                 return
             
-            # Propose command
+            # Propose command (requires consensus)
             command = Command(CommandType.PUT, key, value)
             result = self.raft_node.propose_command(command)
             
             if result['success']:
+                # Invalidate cache on write
+                if self.read_cache:
+                    self.read_cache.invalidate(key)
+                
                 self._send_json({
                     'key': key,
                     'value': value,
@@ -211,16 +266,20 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
             self._send_json({'error': str(e)}, 500)
     
     def _handle_delete(self):
-        """Delete key"""
+        """Delete key (always requires consensus)"""
         path = urlparse(self.path).path
         key = path[4:]  # Remove '/kv/' prefix
         
         try:
-            # Propose command
+            # Propose command (requires consensus)
             command = Command(CommandType.DELETE, key)
             result = self.raft_node.propose_command(command)
             
             if result['success']:
+                # Invalidate cache on write
+                if self.read_cache:
+                    self.read_cache.invalidate(key)
+                
                 self._send_json({
                     'key': key,
                     'message': 'Deleted successfully',
@@ -234,11 +293,122 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
                 
         except Exception as e:
             self._send_json({'error': str(e)}, 500)
+    
+    def _handle_list_members(self):
+        """Get current cluster membership"""
+        try:
+            if hasattr(self.raft_node, 'dynamic_membership'):
+                members = list(self.raft_node.dynamic_membership.current_peers)
+            else:
+                members = list(self.raft_node.peers)
+            
+            self._send_json({
+                'members': members,
+                'node_id': self.raft_node.node_id,
+                'state': self.raft_node.state.value,
+                'leader': self.raft_node.leader_id
+            })
+        except Exception as e:
+            self._send_json({'error': str(e)}, 500)
+    
+    def _handle_add_member(self):
+        """Add a new member to the cluster"""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode('utf-8')
+            data = json.loads(body)
+            
+            peer_address = data.get('peer')
+            if not peer_address:
+                self._send_json({'error': 'Missing "peer" in request'}, 400)
+                return
+            
+            # Check if we're the leader
+            if self.raft_node.state.value != 'LEADER':
+                self._send_json({
+                    'error': 'Only leader can add members',
+                    'leader': self.raft_node.leader_id
+                }, 503)
+                return
+            
+            # Add the member
+            if hasattr(self.raft_node, 'dynamic_membership'):
+                result = self.raft_node.dynamic_membership.add_server(peer_address)
+            else:
+                # Fallback: just add to peers list
+                if peer_address not in self.raft_node.peers:
+                    self.raft_node.peers.append(peer_address)
+                    result = {'success': True, 'message': f'Added {peer_address}'}
+                else:
+                    result = {'success': False, 'error': 'Already in cluster'}
+            
+            if result['success']:
+                self._send_json({
+                    'message': f'Added {peer_address} to cluster',
+                    'members': list(self.raft_node.peers)
+                }, 200)
+            else:
+                self._send_json({'error': result.get('error')}, 400)
+        
+        except json.JSONDecodeError:
+            self._send_json({'error': 'Invalid JSON in request'}, 400)
+        except Exception as e:
+            self._send_json({'error': str(e)}, 500)
+    
+    def _handle_remove_member(self):
+        """Remove a member from the cluster"""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode('utf-8')
+            data = json.loads(body)
+            
+            peer_address = data.get('peer')
+            if not peer_address:
+                self._send_json({'error': 'Missing "peer" in request'}, 400)
+                return
+            
+            # Check if we're the leader
+            if self.raft_node.state.value != 'LEADER':
+                self._send_json({
+                    'error': 'Only leader can remove members',
+                    'leader': self.raft_node.leader_id
+                }, 503)
+                return
+            
+            # Remove the member
+            if hasattr(self.raft_node, 'dynamic_membership'):
+                result = self.raft_node.dynamic_membership.remove_server(peer_address)
+            else:
+                # Fallback: just remove from peers list
+                if peer_address in self.raft_node.peers:
+                    self.raft_node.peers.remove(peer_address)
+                    result = {'success': True, 'message': f'Removed {peer_address}'}
+                else:
+                    result = {'success': False, 'error': 'Not in cluster'}
+            
+            if result['success']:
+                self._send_json({
+                    'message': f'Removed {peer_address} from cluster',
+                    'members': list(self.raft_node.peers)
+                }, 200)
+            else:
+                self._send_json({'error': result.get('error')}, 400)
+        
+        except json.JSONDecodeError:
+            self._send_json({'error': 'Invalid JSON in request'}, 400)
+        except Exception as e:
+            self._send_json({'error': str(e)}, 500)
 
-def create_raft_rpc_server(raft_node, host, port):
+
+def create_raft_rpc_server(raft_node, host, port, enable_lease=True):
     """
     Create an HTTP server for Raft RPC AND HTTP API.
-    Uses the combined RaftRPCHandler that handles both Raft communication and client API requests.
+    
+    Args:
+        raft_node: The RaftNode instance
+        host: Host to bind to
+        port: Port to bind to
+        enable_lease: Enable lease-based reads for 10x read speedup
     """
     # Create a handler class bound to this specific raft_node
     class BoundHandler(RaftRPCHandler):
@@ -246,6 +416,11 @@ def create_raft_rpc_server(raft_node, host, port):
     
     # Bind the raft_node to the handler class
     BoundHandler.raft_node = raft_node
+    
+    # Initialize lease manager and read cache if enabled
+    if enable_lease:
+        BoundHandler.lease_manager = LeaseManager(lease_duration_ms=500)
+        BoundHandler.read_cache = ReadCache(ttl_seconds=1.0)
     
     # Create server with the bound handler
     class QuietHTTPServer(HTTPServer):
