@@ -104,6 +104,8 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
             self._handle_status()
         elif path.startswith('/kv/'):
             self._handle_get()
+        elif path == '/metrics':
+            self._handle_metrics()
         else:
             self.send_error(404)
     
@@ -156,6 +158,17 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
                 self._send_json({'error': 'Key not found'}, 404)
             else:
                 self._send_json({'key': key, 'value': value})
+        except Exception as e:
+            self._send_json({'error': str(e)}, 500)
+
+    def _handle_metrics(self):
+        """Get Prometheus metrics"""
+        try:
+            metrics_text = self.raft_node.metrics.prometheus_format(self.raft_node.node_id)
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; version=0.0.4')
+            self.end_headers()
+            self.wfile.write(metrics_text.encode('utf-8'))
         except Exception as e:
             self._send_json({'error': str(e)}, 500)
     
