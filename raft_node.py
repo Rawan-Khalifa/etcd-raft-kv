@@ -17,6 +17,9 @@ from rpc import (
 )
 from raft_grpc_client import RaftGRPCClient
 
+import concurrent.futures
+from metrics import Metrics
+
 class NodeState(Enum):
     """The three possible states a Raft node can be in"""
     FOLLOWER = "FOLLOWER"
@@ -54,6 +57,9 @@ class RaftNode:
 
         # Create gRPC client
         self.rpc_client = RaftGRPCClient()
+
+        # Metrics tracking
+        self.metrics = Metrics()
 
         # Persistence - Initialize BEFORE loading state
         self.enable_persistence = enable_persistence
@@ -314,6 +320,8 @@ class RaftNode:
             
             if old_state != NodeState.FOLLOWER or old_term != term:
                 print(f"[{self.node_id}] Became FOLLOWER in term {term}")
+
+            self.metrics.record_leader_change(None)
             
 
     def _become_candidate(self):
@@ -330,6 +338,9 @@ class RaftNode:
                 self.wal.save_persistent_state(self.current_term, self.voted_for)
             
             print(f"[{self.node_id}] Became CANDIDATE in term {self.current_term}")
+            
+            # Record election start
+            self.metrics.record_election_start()
     
         # Start election outside the lock
         self._start_election()
@@ -365,6 +376,10 @@ class RaftNode:
             self._heartbeat_thread.start()
             
             print(f"[{self.node_id}] Started heartbeat thread")
+
+            # Record successful election
+            self.metrics.record_election_won()
+            self.metrics.record_leader_change(self.node_id)
     
         # Send immediate heartbeats outside lock
         # This is CRITICAL - establish leadership immediately
@@ -441,6 +456,15 @@ class RaftNode:
                             self.state_machine.apply_command(entry.command)
                             self.last_applied = i
                             print(f"[{self.node_id}] Applied entry {i}: {entry.command}")
+                
+                # Update metrics with current state
+                self.metrics.update_state(
+                    self.current_term,
+                    self.commit_index,
+                    self.last_applied,
+                    self.log.last_index(),
+                    len(self.peers)
+                )
                 
                 # Periodically check if we should snapshot
                 current_time = time.time()
@@ -592,6 +616,8 @@ class RaftNode:
     
         # Didn't win election
         print(f"[{self.node_id}] Lost election (got {votes_received}/{votes_needed} votes)")
+        
+        self.metrics.record_election_lost()
         
         with self._lock:
             # Reset for next election attempt
