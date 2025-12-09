@@ -19,6 +19,8 @@ from raft_grpc_client import RaftGRPCClient
 
 import concurrent.futures
 from metrics import Metrics
+from lease import LeaseManager, ReadCache
+from dynamic_membership import DynamicMembership
 
 class NodeState(Enum):
     """The three possible states a Raft node can be in"""
@@ -60,6 +62,13 @@ class RaftNode:
 
         # Metrics tracking
         self.metrics = Metrics()
+
+        # Lease-based reads for 10x performance
+        self.lease_manager = LeaseManager(lease_duration_ms=500)
+        self.read_cache = ReadCache(ttl_seconds=1.0)
+
+        # Dynamic membership management
+        self.dynamic_membership = DynamicMembership(list(peers))
 
         # Persistence - Initialize BEFORE loading state
         self.enable_persistence = enable_persistence
@@ -195,8 +204,8 @@ class RaftNode:
                 self._grpc_server = grpc_server
                 print(f"[{self.node_id}] ✓ gRPC server started on port {grpc_port}")
                 
-                # Start HTTP server for client APIs (/status, /kv/*)
-                http_server = create_raft_rpc_server(self, host, http_port)
+                # Start HTTP server for client APIs (/status, /kv/*) with lease-based reads
+                http_server = create_raft_rpc_server(self, host, http_port, enable_lease=True)
                 self._server = http_server
                 
                 self._server_thread = threading.Thread(
@@ -359,9 +368,17 @@ class RaftNode:
             
             # Initialize leader state
             last_log_index = self.log.last_index()
-            for peer in self.peers:
+            
+            # Sync peers from dynamic membership if available
+            current_peers = list(self.dynamic_membership.current_peers) if hasattr(self, 'dynamic_membership') else self.peers
+            
+            for peer in current_peers:
                 self.next_index[peer] = last_log_index + 1
                 self.match_index[peer] = 0
+            
+            # Update self.peers if using dynamic membership
+            if hasattr(self, 'dynamic_membership'):
+                self.peers = current_peers
             
             # ADD THIS DEBUG LINE:
             print(f"[{self.node_id}] Leader initialized with peers: {self.peers}")
@@ -456,6 +473,13 @@ class RaftNode:
                             self.state_machine.apply_command(entry.command)
                             self.last_applied = i
                             print(f"[{self.node_id}] Applied entry {i}: {entry.command}")
+                            
+                            # Invalidate read cache on writes
+                            if hasattr(entry.command, 'command_type'):
+                                cmd_type = entry.command.command_type.value if hasattr(entry.command.command_type, 'value') else str(entry.command.command_type)
+                                if cmd_type in ['put', 'delete']:
+                                    if hasattr(self, 'read_cache') and hasattr(entry.command, 'key'):
+                                        self.read_cache.invalidate(entry.command.key)
                 
                 # Update metrics with current state
                 self.metrics.update_state(
@@ -834,6 +858,56 @@ class RaftNode:
         """Read operation (doesn't need consensus)"""
         return self.store.get(key)
     
+    def add_member(self, peer_address: str) -> dict:
+        """Add a new member to the cluster (leader only)"""
+        with self._lock:
+            if self.state.value != 'LEADER':
+                return {
+                    'success': False,
+                    'error': 'Only leader can add members',
+                    'leader': self.leader_id
+                }
+            
+            if hasattr(self, 'dynamic_membership'):
+                result = self.dynamic_membership.add_server(peer_address)
+                if result['success']:
+                    # Update peers list
+                    if peer_address not in self.peers:
+                        self.peers.append(peer_address)
+                    return result
+            else:
+                # Fallback: just add to peers
+                if peer_address not in self.peers:
+                    self.peers.append(peer_address)
+                    return {'success': True, 'message': f'Added {peer_address}'}
+            
+            return result
+    
+    def remove_member(self, peer_address: str) -> dict:
+        """Remove a member from the cluster (leader only)"""
+        with self._lock:
+            if self.state.value != 'LEADER':
+                return {
+                    'success': False,
+                    'error': 'Only leader can remove members',
+                    'leader': self.leader_id
+                }
+            
+            if hasattr(self, 'dynamic_membership'):
+                result = self.dynamic_membership.remove_server(peer_address)
+                if result['success']:
+                    # Update peers list
+                    if peer_address in self.peers:
+                        self.peers.remove(peer_address)
+                    return result
+            else:
+                # Fallback: just remove from peers
+                if peer_address in self.peers:
+                    self.peers.remove(peer_address)
+                    return {'success': True, 'message': f'Removed {peer_address}'}
+            
+            return result
+    
     # Update get_status to include snapshot info:
     def get_status(self):
         """Get current node status for monitoring"""
@@ -842,7 +916,7 @@ class RaftNode:
             if self.wal:
                 snapshot_info = self.wal.get_snapshot_info()
             
-            return {
+            status_dict = {
                 'node_id': self.node_id,
                 'state': self.state.value,
                 'term': self.current_term,
@@ -852,8 +926,18 @@ class RaftNode:
                 'commit_index': self.commit_index,
                 'last_applied': self.last_applied,
                 'peers': list(self.peers) if self.peers else [],
-                'snapshot': snapshot_info  # Add snapshot info
+                'snapshot': snapshot_info,
+                'lease_active': (hasattr(self, 'lease_manager') and 
+                               self.lease_manager.is_lease_valid() and 
+                               self.state.value == 'FOLLOWER'),
+                'dynamic_membership_enabled': hasattr(self, 'dynamic_membership')
             }
+            
+            # Add membership info if available
+            if hasattr(self, 'dynamic_membership'):
+                status_dict['members'] = list(self.dynamic_membership.current_peers)
+            
+            return status_dict
         
     def handle_request_vote(self, request: RequestVoteRequest) -> RequestVoteResponse:
         """Handle RequestVote RPC from candidate with persistence"""
