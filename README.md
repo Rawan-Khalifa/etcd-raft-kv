@@ -1,4 +1,3 @@
-
 # Raft Cluster Feature Test Guide
 
 This document walks through every feature showcased in `demo.sh`, using plain shell and `curl` commands. Run everything from the repository root on macOS/Linux with `zsh` or `bash`.

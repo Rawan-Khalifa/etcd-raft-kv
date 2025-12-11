@@ -114,7 +114,7 @@ class RaftNode:
         
         # State machine
         self.store = KVStore()
-        self.state_machine = StateMachine(self.store, self.log)
+        self.state_machine = StateMachine(self.store, self.log, raft_node=self)
         
         # Load snapshot state if available (MUST be after KVStore creation)
         if self.wal:
