@@ -1,3 +1,4 @@
+
 # Raft Cluster Feature Test Guide
 
 This document walks through every feature showcased in `demo.sh`, using plain shell and `curl` commands. Run everything from the repository root on macOS/Linux with `zsh` or `bash`.
@@ -225,5 +226,3 @@ _What it does_: cleanly stops all Raft node processes and the visualizer so the 
 ./stop_cluster.sh
 pkill -f demo_visualizer.py || true
 ```
-
-You now have reproducible steps to validate every feature advertised in the demo script, without relying on the scripted pauses/prompts.
