@@ -956,7 +956,8 @@ class RaftNode:
                 'lease_active': (hasattr(self, 'lease_manager') and 
                                self.lease_manager.is_lease_valid() and 
                                self.state.value == 'FOLLOWER'),
-                'dynamic_membership_enabled': hasattr(self, 'dynamic_membership')
+                'dynamic_membership_enabled': hasattr(self, 'dynamic_membership'),
+                'metrics': self.metrics.get_metrics()  # Add metrics
             }
             
             # Add membership info if available
