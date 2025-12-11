@@ -312,7 +312,7 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
             self._send_json({'error': str(e)}, 500)
     
     def _handle_add_member(self):
-        """Add a new member to the cluster"""
+        """Add a new member to the cluster via Raft consensus"""
         try:
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length).decode('utf-8')
@@ -331,32 +331,35 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
                 }, 503)
                 return
             
-            # Add the member
-            if hasattr(self.raft_node, 'dynamic_membership'):
-                result = self.raft_node.dynamic_membership.add_server(peer_address)
-            else:
-                # Fallback: just add to peers list
-                if peer_address not in self.raft_node.peers:
-                    self.raft_node.peers.append(peer_address)
-                    result = {'success': True, 'message': f'Added {peer_address}'}
-                else:
-                    result = {'success': False, 'error': 'Already in cluster'}
+            # Check if already in cluster
+            if peer_address in self.raft_node.peers:
+                self._send_json({'error': 'Server already in cluster'}, 400)
+                return
+            
+            # Create a membership change command and add to log
+            # This will be replicated to all followers through Raft consensus
+            command = Command(CommandType.MEMBERSHIP_ADD, peer_address)
+            result = self.raft_node.propose_command(command)
             
             if result['success']:
                 self._send_json({
                     'message': f'Added {peer_address} to cluster',
-                    'members': list(self.raft_node.peers)
+                    'members': list(self.raft_node.peers),
+                    'log_index': result.get('index')
                 }, 200)
             else:
-                self._send_json({'error': result.get('error')}, 400)
-        
+                self._send_json({
+                    'error': result.get('error', 'Failed to add member'),
+                    'leader': result.get('leader')
+                }, 503)
+    
         except json.JSONDecodeError:
             self._send_json({'error': 'Invalid JSON in request'}, 400)
         except Exception as e:
             self._send_json({'error': str(e)}, 500)
     
     def _handle_remove_member(self):
-        """Remove a member from the cluster"""
+        """Remove a member from the cluster via Raft consensus"""
         try:
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length).decode('utf-8')
@@ -375,25 +378,33 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
                 }, 503)
                 return
             
-            # Remove the member
-            if hasattr(self.raft_node, 'dynamic_membership'):
-                result = self.raft_node.dynamic_membership.remove_server(peer_address)
-            else:
-                # Fallback: just remove from peers list
-                if peer_address in self.raft_node.peers:
-                    self.raft_node.peers.remove(peer_address)
-                    result = {'success': True, 'message': f'Removed {peer_address}'}
-                else:
-                    result = {'success': False, 'error': 'Not in cluster'}
+            # Check if in cluster
+            if peer_address not in self.raft_node.peers:
+                self._send_json({'error': 'Server not in cluster'}, 400)
+                return
+            
+            # Prevent removing the last node
+            if len(self.raft_node.peers) <= 1:
+                self._send_json({'error': 'Cannot remove last server'}, 400)
+                return
+            
+            # Create a membership change command and add to log
+            # This will be replicated to all followers through Raft consensus
+            command = Command(CommandType.MEMBERSHIP_REMOVE, peer_address)
+            result = self.raft_node.propose_command(command)
             
             if result['success']:
                 self._send_json({
                     'message': f'Removed {peer_address} from cluster',
-                    'members': list(self.raft_node.peers)
+                    'members': list(self.raft_node.peers),
+                    'log_index': result.get('index')
                 }, 200)
             else:
-                self._send_json({'error': result.get('error')}, 400)
-        
+                self._send_json({
+                    'error': result.get('error', 'Failed to remove member'),
+                    'leader': result.get('leader')
+                }, 503)
+    
         except json.JSONDecodeError:
             self._send_json({'error': 'Invalid JSON in request'}, 400)
         except Exception as e:

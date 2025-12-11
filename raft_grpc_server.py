@@ -51,10 +51,14 @@ class RaftRPCServicer(raft_pb2_grpc.RaftRPCServicer):
     def AppendEntries(self, request: raft_pb2.AppendEntriesRequest, context: grpc.ServicerContext) -> raft_pb2.AppendEntriesResponse:
         """Handle AppendEntries RPC"""
         try:
+            # DEBUG: Log incoming request
+            print(f"[gRPC-Server] >>> AppendEntries from leader {request.leader_id} (term={request.term}, prev_index={request.prev_log_index}, entries={len(request.entries)})", flush=True)
+            
             entries = []
             for entry in request.entries:
+                proto_type_name = raft_pb2.CommandType.Name(entry.command.type)
                 cmd = Command.from_dict({
-                    'type': raft_pb2.CommandType.Name(entry.command.type),
+                    'type': proto_type_name.lower(),
                     'key': entry.command.key,
                     'value': entry.command.value if entry.command.value else None
                 })
@@ -74,6 +78,9 @@ class RaftRPCServicer(raft_pb2_grpc.RaftRPCServicer):
             )
             
             internal_response = self.raft_node.handle_append_entries(internal_request)
+            
+            # DEBUG: Log response
+            print(f"[gRPC-Server] <<< Returning: success={internal_response.success}, match_index={internal_response.match_index}, term={internal_response.term}", flush=True)
             
             return raft_pb2.AppendEntriesResponse(
                 term=internal_response.term,

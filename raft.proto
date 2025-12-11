@@ -6,6 +6,8 @@ package raft;
 enum CommandType {
   PUT = 0;
   DELETE = 1;
+  MEMBERSHIP_ADD = 2;
+  MEMBERSHIP_REMOVE = 3;
 }
 
 // A single state machine command (PUT or DELETE)

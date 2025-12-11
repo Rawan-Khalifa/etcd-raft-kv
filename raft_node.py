@@ -7,7 +7,7 @@ from typing import Optional, List, Set
 from log import Log
 from kvstore import KVStore
 from state_machine import StateMachine
-from command import Command
+from command import Command, CommandType
 from wal import WriteAheadLog
 
 from rpc import (
@@ -476,10 +476,24 @@ class RaftNode:
                             
                             # Invalidate read cache on writes
                             if hasattr(entry.command, 'command_type'):
-                                cmd_type = entry.command.command_type.value if hasattr(entry.command.command_type, 'value') else str(entry.command.command_type)
-                                if cmd_type in ['put', 'delete']:
+                                cmd_type = entry.command.command_type
+                                if cmd_type == CommandType.PUT or cmd_type == CommandType.DELETE:
                                     if hasattr(self, 'read_cache') and hasattr(entry.command, 'key'):
                                         self.read_cache.invalidate(entry.command.key)
+                                
+                                elif cmd_type == CommandType.MEMBERSHIP_ADD:
+                                    # Add peer to cluster
+                                    if entry.command.key not in self.peers:
+                                        self.peers.append(entry.command.key)
+                                    if hasattr(self, 'dynamic_membership'):
+                                        self.dynamic_membership.apply_membership_change('add', entry.command.key)
+                                
+                                elif cmd_type == CommandType.MEMBERSHIP_REMOVE:
+                                    # Remove peer from cluster
+                                    if entry.command.key in self.peers:
+                                        self.peers.remove(entry.command.key)
+                                    if hasattr(self, 'dynamic_membership'):
+                                        self.dynamic_membership.apply_membership_change('remove', entry.command.key)
                 
                 # Update metrics with current state
                 self.metrics.update_state(
@@ -773,8 +787,11 @@ class RaftNode:
             
             if response.success:
                 # Update next_index and match_index for follower
+                old_match = self.match_index.get(peer_address, 0)
                 self.match_index[peer_address] = response.match_index
                 self.next_index[peer_address] = response.match_index + 1
+                
+                print(f"[{self.node_id}] Updated match_index[{peer_address}]: {old_match} -> {response.match_index}", flush=True)
                 
                 # Check if we can advance commit_index
                 self._advance_commit_index()
@@ -801,7 +818,11 @@ class RaftNode:
                     count += 1
             
             # If majority has this entry, and it's from current term, commit it
-            majority = (len(self.peers) + 1) // 2 + 1
+            total_nodes = len(self.peers) + 1  # peers + self
+            majority = (total_nodes // 2) + 1
+            
+            print(f"[{self.node_id}] Check index {n}: count={count}, majority={majority}, match_index={self.match_index}", flush=True)
+            
             if count >= majority:
                 entry = self.log.get(n)
                 if entry and entry.term == self.current_term:

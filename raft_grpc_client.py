@@ -95,11 +95,18 @@ class RaftGRPCClient:
             proto_entries = []
             for entry in request.entries:
                 cmd = entry.command  # Already a dict
+                cmd_type = cmd['type']
+                proto_type_name = cmd_type.upper()
+                try:
+                    proto_cmd_type = raft_pb2.CommandType.Value(proto_type_name)
+                except ValueError as exc:
+                    logger.error(f"Unknown command type '{cmd_type}' when sending AppendEntries to {address}")
+                    raise
                 proto_entries.append(raft_pb2.LogEntry(
                     index=entry.index,
                     term=entry.term,
                     command=raft_pb2.Command(
-                        type=raft_pb2.CommandType.Value(cmd['type']),
+                        type=proto_cmd_type,
                         key=cmd['key'],
                         value=cmd.get('value', '')
                     )
@@ -114,6 +121,11 @@ class RaftGRPCClient:
                 entries=proto_entries,
                 leader_commit=request.leader_commit
             )
+            
+            # DEBUG: Log outgoing request
+            import sys
+            print(f"[gRPC-Client] >>> AppendEntries to {address}: term={request.term}, prev_index={request.prev_log_index}, entries={len(request.entries)}", flush=True)
+            sys.stdout.flush()
             
             # Create stub if needed
             target = address.replace('http://', '').replace('https://', '')
@@ -132,6 +144,11 @@ class RaftGRPCClient:
                     proto_request,
                     timeout=self.timeout
                 )
+                
+                # DEBUG: Log response
+                import sys
+                print(f"[gRPC-Client] <<< Response from {address}: success={proto_response.success}, match_index={proto_response.match_index}, term={proto_response.term}", flush=True)
+                sys.stdout.flush()
                 
                 # Convert back to internal format
                 return AppendEntriesResponse(
