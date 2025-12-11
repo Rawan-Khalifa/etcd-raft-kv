@@ -104,6 +104,18 @@ class Metrics:
             'replication_latency_samples': len(self.replication_latency_ms),
         }
     
+    def _calculate_histogram_buckets(self, samples: list, buckets: list) -> dict:
+        """Calculate histogram bucket counts"""
+        bucket_counts = {b: 0 for b in buckets}
+        bucket_counts['+Inf'] = len(samples)
+        
+        for sample in samples:
+            for bucket in buckets:
+                if sample <= bucket:
+                    bucket_counts[bucket] += 1
+        
+        return bucket_counts
+    
     def prometheus_format(self, node_id: str) -> str:
         """Export metrics in Prometheus text format"""
         metrics = self.get_metrics()
@@ -135,5 +147,42 @@ class Metrics:
             f"# HELP raft_uptime_seconds Node uptime",
             f"# TYPE raft_uptime_seconds gauge",
             f'raft_uptime_seconds{{node="{node_id}"}} {metrics["uptime_seconds"]:.2f}',
+            f"",
+            # Add histogram for election latency
+            f"# HELP raft_election_latency_ms Election completion time in milliseconds",
+            f"# TYPE raft_election_latency_ms histogram",
         ]
+        
+        # Define buckets (in milliseconds)
+        election_buckets = [10, 50, 100, 500, 1000, 5000]
+        buckets = self._calculate_histogram_buckets(self.election_latency_ms, election_buckets)
+        
+        # Export bucket counts
+        for bucket in election_buckets:
+            lines.append(f'raft_election_latency_ms_bucket{{node="{node_id}",le="{bucket}"}} {buckets[bucket]}')
+        lines.append(f'raft_election_latency_ms_bucket{{node="{node_id}",le="+Inf"}} {buckets["+Inf"]}')
+        
+        # Export sum and count
+        total_ms = sum(self.election_latency_ms)
+        count = len(self.election_latency_ms)
+        lines.append(f'raft_election_latency_ms_sum{{node="{node_id}"}} {total_ms}')
+        lines.append(f'raft_election_latency_ms_count{{node="{node_id}"}} {count}')
+        lines.append("")
+        
+        # Same for replication latency
+        lines.append(f"# HELP raft_replication_latency_ms Replication time in milliseconds")
+        lines.append(f"# TYPE raft_replication_latency_ms histogram")
+        
+        replication_buckets = [1, 5, 10, 50, 100, 500]
+        buckets = self._calculate_histogram_buckets(self.replication_latency_ms, replication_buckets)
+        
+        for bucket in replication_buckets:
+            lines.append(f'raft_replication_latency_ms_bucket{{node="{node_id}",le="{bucket}"}} {buckets[bucket]}')
+        lines.append(f'raft_replication_latency_ms_bucket{{node="{node_id}",le="+Inf"}} {buckets["+Inf"]}')
+        
+        total_ms = sum(self.replication_latency_ms)
+        count = len(self.replication_latency_ms)
+        lines.append(f'raft_replication_latency_ms_sum{{node="{node_id}"}} {total_ms}')
+        lines.append(f'raft_replication_latency_ms_count{{node="{node_id}"}} {count}')
+        
         return "\n".join(lines)
