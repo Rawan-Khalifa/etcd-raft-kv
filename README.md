@@ -1,6 +1,77 @@
-# Raft Cluster Feature Test Guide
+# Raft Consensus Implementation
 
-This document walks through every feature showcased in `demo.sh`, using plain shell and `curl` commands. Run everything from the repository root on macOS/Linux with `zsh` or `bash`.
+A production-quality implementation of the Raft consensus algorithm in Python, featuring leader election, log replication, snapshots, dynamic membership, and lease-based reads.
+
+## 🎯 What This Project Delivers
+
+**Two ways to use this project:**
+
+### 1. **Distributed Key-Value Store** (Run as Application)
+- 3-node cluster with automatic leader election and failover
+- Simple CLI tool for interacting with the cluster
+- HTTP API for client operations
+- Lease-based reads for 10x faster performance
+- Prometheus metrics for monitoring
+
+### 2. **Raft Library** (Import in Your Code)
+Build your own distributed systems on top of Raft consensus:
+```python
+from raft import RaftNode, Command, CommandType
+# Create custom distributed applications
+```
+
+## 🚀 Quick Start
+
+### Installation
+
+```bash
+git clone https://github.com/Rawan-Khalifa/etcd-raft-kv.git
+cd etcd-raft-kv
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .  # Installs library + CLI tool
+```
+
+### Running the Cluster
+
+```bash
+# Start 3-node cluster
+./scripts/start_cluster.sh
+
+# Interact using the CLI
+raft-cli status                    # Check cluster health
+raft-cli put mykey myvalue         # Write data
+raft-cli get mykey                 # Read data
+raft-cli members                   # List cluster members
+
+# Or use curl directly
+curl http://localhost:9010/kv/mykey
+
+# Stop cluster
+./scripts/stop_cluster.sh
+```
+
+### Using as a Library
+
+```python
+from raft import RaftNode, Command, CommandType
+
+# Create a Raft node
+node = RaftNode(
+    node_id="node1",
+    peers=["localhost:9002", "localhost:9003"],
+    address="localhost:9001",
+    enable_persistence=True
+)
+node.start()
+
+# Write data
+cmd = Command(CommandType.PUT, "key", "value")
+node.propose_command(cmd)
+
+# Read data
+value = node.get("key")
+```
 
 ## Architecture at a Glance
 
@@ -27,201 +98,336 @@ This document walks through every feature showcased in `demo.sh`, using plain sh
 
 Each Raft node exposes an HTTP surface for clients, a gRPC surface for consensus, and persists to `raft_data/node*/{log,state,snapshots}` so that the demo commands can prove durability, replication, failover, and compaction end-to-end.
 
-## 0. Prerequisites
-- Python 3.11+ (the repo uses a virtualenv called `.venv`).
-- gRPC tools installed via `pip install -r requirements.txt`.
-- Three terminals are handy: one for the cluster, one for the visualizer, one for commands below.
+## ✨ Features
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+| Feature | Description |
+|---------|-------------|
+| **Leader Election** | Automatic failover when leader crashes |
+| **Log Replication** | Strongly consistent writes across all nodes |
+| **Persistence** | Write-Ahead Log (WAL) + B-tree storage |
+| **Snapshots** | Automatic log compaction |
+| **Lease-Based Reads** | 10x faster reads from followers (eventual consistency) |
+| **Dynamic Membership** | Add/remove nodes without downtime |
+| **Metrics** | Prometheus-compatible metrics endpoint |
+| **CLI Tool** | Simple command-line interface (`raft-cli`) |
+
+## 📁 Project Structure
+
+```
+raft/                   # Importable Python library
+├── core/               # Raft consensus algorithm
+│   ├── node.py         # Main RaftNode implementation
+│   ├── log.py          # Replicated log
+│   └── command.py      # State machine commands
+├── storage/            # Persistence layer
+│   ├── kvstore.py      # Key-value store
+│   ├── btree.py        # B-tree for ordered storage
+│   ├── wal.py          # Write-Ahead Log
+│   └── snapshot.py     # Snapshot management
+├── transport/          # Network layer
+│   ├── grpc_server.py  # gRPC for inter-node communication
+│   ├── http_server.py  # HTTP API for clients
+│   └── rpc.py          # RPC definitions
+├── features/           # Advanced features
+│   ├── lease.py        # Lease-based reads
+│   └── metrics.py      # Prometheus metrics
+└── proto/              # Protocol Buffers definitions
+
+scripts/                # Operational tools
+├── raft_cli.py         # CLI tool (installed as raft-cli)
+├── start_cluster.sh    # Start 3-node cluster
+├── stop_cluster.sh     # Stop cluster
+└── test_all_features.sh # Automated test suite
 ```
 
-## 1. Start the Cluster & Visualizer
-1. Launch the 3-node cluster:
-   _What it does_: spawns three Raft nodes (`start_node1-3.py`) plus the coordinator, wiring HTTP ports 9010-9012 and gRPC ports 9001-9003. Expect leader election logs within ~3 seconds; failures here mean Python deps or ports are misconfigured.
-   ```bash
-   ./start_cluster.sh
-   ```
-2. In another terminal, start the demo visualizer (optional but recommended):
-   _What it does_: tails metrics/status endpoints to render cluster health. Successful connection proves the `/status` and `/metrics` HTTP routes are live.
-   ```bash
-   ./demo_visualizer.py
-   ```
+## 🧪 Testing
 
-## 2. Key-Value Operations & Replication
-1. Put sample keys on the leader (HTTP port 9010):
-   _What it does_: sends client PUTs through `kvstore.py`, which writes to the leader's B-Tree + WAL and replicates log entries to followers via gRPC AppendEntries. Expect `{"status": "ok"}` JSON responses and follower logs growing.
-   ```bash
-   curl -X PUT http://localhost:9012/kv/user:1 -H 'Content-Type: application/json' -d '{"value": "Alice"}' | python3 -m json.tool
-   curl -X PUT http://localhost:9012/kv/user:2 -H 'Content-Type: application/json' -d '{"value": "Bob"}' | python3 -m json.tool
-   curl -X PUT http://localhost:9012/kv/user:3 -H 'Content-Type: application/json' -d '{"value": "Charlie"}' | python3 -m json.tool
-   ```
-2. Read from leader and followers to confirm replication:
-   _What it does_: queries both leader (9010) and followers (9011/9012). Followers serve GETs only if they've applied entries from the replicated log, so matching payloads prove Raft replication + B-Tree materialization across the cluster.
-   ```bash
-   curl -s http://localhost:9011/kv/user:1 | python3 -m json.tool
-   curl -s http://localhost:9011/kv/user:2 | python3 -m json.tool
-   curl -s http://localhost:9012/kv/user:3 | python3 -m json.tool
-   ```
-3. Delete a key and verify the delete replicated:
-   _What it does_: issues a DELETE to the leader, then reads from a follower. Seeing `{}` (not found) from the follower confirms log entries for deletes are replicated and the state machine applies tombstones consistently.
-   ```bash
-   curl -X DELETE http://localhost:9012/kv/user:2 | python3 -m json.tool
-   curl -s http://localhost:9012/kv/user:2 | python3 -m json.tool
-   ```
-
-## 3. Crash Recovery & Leader Election
-1. Check current leader:
-   _What it does_: hits `/status` on node1 and extracts leader/state fields. Successful output proves the HTTP control plane and in-memory `RaftNode` metadata are in sync.
-   ```bash
-   curl -s http://localhost:9010/status | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Leader: {d[\"leader_id\"]}, State: {d[\"state\"]}')"
-   ```
-2. Capture leader port (9010=node1, 9011=node2, 9012=node3):
-   _What it does_: rewrites the leader's logical ID into the matching client port so you can direct disruptive commands at the actual leader host.
-   ```bash
-   LEADER_PORT=$(curl -s http://localhost:9010/status | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[\"leader_id\"].replace('node','900')+'0')")
-   echo "Leader listening on $LEADER_PORT"
-   ```
-3. Crash the leader process (choose 1/2/3):
-   _What it does_: kills the chosen `start_nodeX.py` process, simulating machine failure. The remaining nodes should detect the missing heartbeats and trigger a new election.
-   ```bash
-   NODE_TO_CRASH=1   # change as needed
-   pkill -f "start_node${NODE_TO_CRASH}" || true
-   ```
-4. Wait ~3s, then confirm a new leader:
-   _What it does_: re-reads `/status`. Seeing a different `leader_id` proves failover succeeded and the cluster reached consensus with quorum.
-   ```bash
-   curl -s http://localhost:9010/status | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'NEW Leader: {d[\"leader_id\"]}, State: {d[\"state\"]}')"
-   ```
-5. Write data after failover:
-   _What it does_: ensures the newly elected leader still accepts writes and replicates them, demonstrating Raft's safety guarantees after term changes.
-   ```bash
-   curl -X PUT http://localhost:9010/kv/recovered -H 'Content-Type: application/json' -d '{"value": "Data survives crash!"}' | python3 -m json.tool
-   ```
-6. Restart the crashed node:
-   _What it does_: restarts the process and queries its status to confirm it replays WAL+snapshot, catches up via InstallSnapshot/AppendEntries, and rejoins as follower.
-   ```bash
-   python3 start_node${NODE_TO_CRASH}.py > node${NODE_TO_CRASH}.log 2>&1 &
-   sleep 3
-   curl -s http://localhost:900${NODE_TO_CRASH}/status | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Node {d[\"node_id\"]} recovered! State: {d[\"state\"]}')"
-   ```
-
-## 4. Metrics & Observability
-1. Inspect leader metrics (Prometheus format):
-   _What it does_: streams the raw `/metrics` exposition to ensure Prometheus scraping would work and that the instrumentation server thread is alive.
-   ```bash
-   curl -s http://localhost:9010/metrics | head -20
-   ```
-2. Focus on key gauges/counters:
-   _What it does_: filters for Raft-specific counters so you can watch log growth and election totals—useful when validating term bumps or compaction.
-   ```bash
-   curl -s http://localhost:9010/metrics | grep 'raft_elections_total\|raft_leader_elections_total\|raft_current_term\|raft_log_size'
-   ```
-3. Compare election counters across nodes:
-   _What it does_: ensures every node exposes metrics consistently and helps detect stragglers (offline nodes return the fallback message).
-   ```bash
-   for port in 9010 9011 9012; do
-     echo "Node $port"
-     curl -s http://localhost:$port/metrics | grep 'raft_elections_total\|raft_leader_elections_total' || echo "Node offline"
-   done
-   ```
-
-## 5. Architecture & Persistence Checks
-1. Full JSON status snapshot:
-   _What it does_: dumps the full `/status` payload so you can correlate in-memory Raft state (term, commit index, snapshot info) with the visualizer and metrics.
-   ```bash
-   curl -s http://localhost:9010/status | python3 -m json.tool | head -30
-   ```
-2. Show snapshot metadata files:
-   _What it does_: lists on-disk snapshot manifests proving that periodic compaction is writing to `raft_data/node*/snapshots`. Missing files usually mean the snapshot threshold was not crossed.
-   ```bash
-   find raft_data -name 'metadata.json' | head -3
-   ls -lah raft_data/node1/snapshots/ 2>/dev/null || echo 'No snapshots yet'
-   ```
-3. Inspect Write-Ahead Log (WAL) footprint:
-   _What it does_: uses `du` and `cat` to show disk usage plus the persisted finite state machine state so you can validate durability and log trimming effects.
-   ```bash
-   du -sh raft_data/node1/
-   cat raft_data/node1/state.json
-   ```
-
-## 6. Snapshots & Log Compaction
-1. Baseline snapshot/log stats:
-   _What it does_: inspects `/status.snapshot` to capture the pre-load values for `log_size`, `last_applied`, and the snapshot list so you can compare after bulk writes. Queries the leader node since only the leader creates snapshots.
-   ```bash
-   LEADER_PORT=$(curl -s http://localhost:9010/status | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['leader_id'].replace('node','901'))")
-   curl -s http://localhost:$LEADER_PORT/status | python3 -c "import sys,json; d=json.load(sys.stdin); s=d['snapshot']; print(f'Log entries: {d[\"log_size\"]}, Last applied: {d[\"last_applied\"]}, Snapshots: {len(s.get(\"snapshots\", []))}')"
-   ```
-2. Flood writes to cross the snapshot interval (default 100 entries):
-   _What it does_: inserts 120 keys so the log exceeds the snapshot threshold configured in `snapshot.py`, forcing the leader to cut a snapshot and compact its WAL. Writes go to the leader port.
-   ```bash
-   LEADER_PORT=$(curl -s http://localhost:9010/status | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['leader_id'].replace('node','901'))")
-   for i in {1..120}; do
-     curl -X PUT http://localhost:$LEADER_PORT/kv/key_$i \
-       -H 'Content-Type: application/json' \
-       -d "{\"value\": \"value_$i\"}" >/dev/null 2>&1
-     if [ $((i % 30)) -eq 0 ]; then echo "  Written $i keys"; fi
-   done
-   ```
-3. Confirm a snapshot materialized:
-   _What it does_: re-checks `/status.snapshot` and lists the snapshot directory to verify new metadata/segments were produced and the `last_snapshot_index` advanced. Checks the leader's data directory.
-   ```bash
-   LEADER_ID=$(curl -s http://localhost:9010/status | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['leader_id'])")
-   LEADER_PORT=$(echo $LEADER_ID | sed 's/node/901/')
-   curl -s http://localhost:$LEADER_PORT/status | python3 -c "import sys,json; d=json.load(sys.stdin); s=d['snapshot']; print(f'Snapshots: {len(s.get(\"snapshots\", []))}, Last index: {s.get(\"last_snapshot_index\", 0)}')"
-   ls -lah raft_data/$LEADER_ID/snapshots/ | tail -5
-   ```
-
-## 7. gRPC Transport & Lease-Based Reads
-1. Write a test key to the leader:
-   _What it does_: creates a key on the leader, which replicates to followers via gRPC. This key will be used to demonstrate follower read caching.
-   ```bash
-   # Get leader and convert to HTTP port (node1->9010, node2->9011, node3->9012)
-   LEADER_ID=$(curl -s http://localhost:9010/status | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['leader_id'])")
-   LEADER_PORT=$((9009 + ${LEADER_ID#node}))
-   curl -X PUT http://localhost:$LEADER_PORT/kv/lease_test -H 'Content-Type: application/json' -d '{"value": "testing leases"}'
-   sleep 1
-   ```
-2. Read twice from a follower to demonstrate cache:
-   _What it does_: the first read validates the lease and loads the value into the follower's cache (`from_cache: false`). The second read within the TTL window (5 seconds) is served directly from cache (`from_cache: true`), demonstrating 10x faster follower reads without consensus overhead.
-   ```bash
-   # Calculate a follower port (different from leader)
-   FOLLOWER_PORT=$([ "$LEADER_PORT" = "9010" ] && echo "9011" || echo "9010")
-   
-   echo "=== First follower read (cache miss) ==="
-   curl -s http://localhost:$FOLLOWER_PORT/kv/lease_test | python3 -m json.tool
-   
-   echo -e "\n=== Second follower read (cache hit) ==="
-   curl -s http://localhost:$FOLLOWER_PORT/kv/lease_test | python3 -m json.tool
-   ```
-3. Verify cache behavior in the response:
-   _What it does_: the JSON response includes `"from_cache": true/false` and `"consistency": "eventual"` to show when the lease-based read cache is active. Leader reads always show `"consistency": "strong"`.
-   ```bash
-   curl -s http://localhost:$FOLLOWER_PORT/kv/lease_test | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Value: {d[\"value\"]}, From cache: {d[\"from_cache\"]}, Consistency: {d[\"consistency\"]}')"
-   ```
-
-## 8. Dynamic Membership (Optional)
-1. List current members:
-   _What it does_: reads the membership table from the coordinator, confirming the control-plane HTTP route is alive and the cluster agrees on its peers.
-   ```bash
-   curl -s http://localhost:9010/membership/list | python3 -m json.tool
-   ```
-2. Propose adding a new peer:
-   _What it does_: posts a membership change command, exercising the Raft configuration change pathway. Expect a JSON acknowledgment; the cluster will attempt to contact the new peer address.
-   ```bash
-   curl -X POST http://localhost:9011/membership/add -H 'Content-Type: application/json' -d '{"peer": "localhost:9004"}'
-   ```
-3. Verify membership update:
-   _What it does_: re-run the list call to confirm the new peer was appended, demonstrating joint consensus handling.
-   ```bash
-   curl -s http://localhost:9010/membership/list | python3 -m json.tool
-   ```
-
-## 9. Cleanup
-_What it does_: cleanly stops all Raft node processes and the visualizer so the next demo starts from a known-good state without orphaned ports.
+Run the comprehensive integration test suite:
 ```bash
-./stop_cluster.sh
-pkill -f demo_visualizer.py || true
+./scripts/test_all_features.sh
 ```
+
+This automated test validates all features end-to-end:
+- ✅ Cluster startup & leader election
+- ✅ Key-value operations & replication  
+- ✅ Prometheus metrics endpoints
+- ✅ Dynamic membership changes
+- ✅ Lease-based read caching
+- ✅ Snapshot creation & log compaction
+
+**Note:** The `tests/` directory contains legacy unit tests from the previous flat structure. These are not currently maintained but are kept for reference. Use `test_all_features.sh` for validation.
+
+## 📖 Usage Examples
+
+### Basic Operations
+
+```bash
+# Write
+raft-cli put user:alice "Alice Johnson"
+
+# Read
+raft-cli get user:alice
+
+# Delete
+raft-cli delete user:alice
+
+# Check cluster status
+raft-cli status
+```
+
+### Leader Election & Failover
+
+```bash
+# Find current leader
+raft-cli status
+
+# Simulate leader crash
+pkill -f "start_node1"  # If node1 is leader
+
+# Wait 3 seconds for re-election
+sleep 3
+
+# Verify new leader elected
+raft-cli status
+
+# Restart crashed node
+python scripts/start_node1.py > node1.log 2>&1 &
+```
+
+### Lease-Based Reads (10x Faster)
+
+```bash
+# Write to leader
+curl -X PUT http://localhost:9010/kv/testkey \
+  -H 'Content-Type: application/json' \
+  -d '{"value": "testvalue"}'
+
+# First read from follower (cache miss)
+curl http://localhost:9011/kv/testkey
+# Returns: {"value": "testvalue", "from_cache": false}
+
+# Second read within 5 seconds (cache hit - 10x faster!)
+curl http://localhost:9011/kv/testkey
+# Returns: {"value": "testvalue", "from_cache": true}
+```
+
+### Dynamic Membership
+
+```bash
+# List current members
+raft-cli members
+
+# Add a new node
+curl -X POST http://localhost:9010/membership/add \
+  -H 'Content-Type: application/json' \
+  -d '{"peer": "localhost:9004"}'
+
+# Verify membership change
+raft-cli members
+
+# Remove a node
+curl -X POST http://localhost:9010/membership/remove \
+  -H 'Content-Type: application/json' \
+  -d '{"peer": "localhost:9004"}'
+```
+
+### Snapshots & Log Compaction
+
+```bash
+# Write 120 entries to trigger snapshot (threshold: 100)
+for i in {1..120}; do
+  raft-cli put key_$i value_$i
+done
+
+# Check if snapshot was created
+ls -lh raft_data/node1/snapshots/
+
+# Verify snapshot in status
+curl http://localhost:9010/status | python3 -m json.tool
+```
+
+### Monitoring with Prometheus Metrics
+
+```bash
+# View all metrics
+curl http://localhost:9010/metrics
+
+# Check specific metrics
+curl -s http://localhost:9010/metrics | grep raft_current_term
+curl -s http://localhost:9010/metrics | grep raft_log_size
+curl -s http://localhost:9010/metrics | grep raft_elections_total
+```
+
+## 🔧 Advanced: Using as a Library
+
+Create a custom distributed application:
+
+```python
+#!/usr/bin/env python3
+from raft import RaftNode, Command, CommandType
+import time
+
+# Create 3 nodes
+nodes = []
+for i in range(1, 4):
+    node = RaftNode(
+        node_id=f"node{i}",
+        peers=[f"localhost:900{j}" for j in range(1, 4) if j != i],
+        address=f"localhost:900{i}",
+        enable_persistence=True,
+        snapshot_interval=100
+    )
+    nodes.append(node)
+
+# Start all nodes
+for node in nodes:
+    node.start()
+    print(f"Started {node.node_id}")
+
+# Wait for leader election
+time.sleep(3)
+
+# Find the leader
+leader = next((n for n in nodes if n.state.value == "LEADER"), None)
+if leader:
+    print(f"Leader: {leader.node_id}")
+    
+    # Propose a command
+    cmd = Command(CommandType.PUT, "mykey", "myvalue")
+    result = leader.propose_command(cmd)
+    print(f"Command result: {result}")
+    
+    # Read from any node
+    for node in nodes:
+        value = node.get("mykey")
+        print(f"{node.node_id}: {value}")
+
+# Cleanup
+input("Press Enter to stop...")
+for node in nodes:
+    node.stop()
+```
+
+## 🏗️ Architecture
+
+```
+┌─────────────┐
+│   Client    │
+│   (CLI/HTTP)│
+└──────┬──────┘
+       │ HTTP API
+       ▼
+┌──────────────────────────────────────┐
+│         Raft Node (Leader)           │
+│  ┌────────────┐  ┌────────────────┐ │
+│  │  HTTP API  │  │  KVStore       │ │
+│  └────────────┘  │  (B-tree+WAL)  │ │
+│  ┌────────────┐  └────────────────┘ │
+│  │gRPC Server │  ┌────────────────┐ │
+│  └────────────┘  │  Snapshots     │ │
+└──────┬───────────┴────────────────┬─┘
+       │ gRPC (AppendEntries)       │
+       ▼                            ▼
+┌─────────────┐            ┌─────────────┐
+│ Raft Node   │◄──────────►│ Raft Node   │
+│ (Follower)  │            │ (Follower)  │
+└─────────────┘            └─────────────┘
+```
+
+**Key Components:**
+- **HTTP Server**: Client-facing API (ports 9010-9012)
+- **gRPC Server**: Inter-node Raft RPCs (ports 9001-9003)
+- **KVStore**: B-tree based key-value storage with WAL
+- **Snapshots**: Automatic log compaction
+- **Lease Manager**: Fast follower reads with lease validation
+
+## 🛠️ Development
+
+### Prerequisites
+- Python 3.8+
+- gRPC tools (installed automatically via `pip install -e .`)
+
+### Running Integration Tests
+```bash
+# Comprehensive end-to-end test suite
+./scripts/test_all_features.sh
+```
+
+### Recompiling Protocol Buffers
+```bash
+# Only needed if you modify raft/proto/raft.proto
+./scripts/compile_protos.sh
+```
+
+### Development Workflow
+```bash
+# Install in editable mode
+pip install -e .
+
+# Start cluster for testing
+./scripts/start_cluster.sh
+
+# Make changes to raft/* code
+# Changes take effect immediately (editable install)
+
+# Test your changes
+./scripts/test_all_features.sh
+
+# Stop cluster
+./scripts/stop_cluster.sh
+```
+
+**Note:** Legacy unit tests in `tests/` are not maintained. They use the old flat structure and would require refactoring to work with the current package organization.
+
+## 📚 Key Concepts
+
+**Leader Election**: When a follower doesn't receive heartbeats, it starts an election. Nodes vote based on log completeness. First to get majority becomes leader.
+
+**Log Replication**: Leader appends client commands to its log, then sends AppendEntries RPCs to followers. Once majority confirm, the entry is committed.
+
+**Lease-Based Reads**: Followers can serve reads without contacting the leader if they have a valid lease (heartbeat within 5s). This provides eventual consistency with 10x performance gain.
+
+**Snapshots**: When the log grows beyond 100 entries, the system creates a snapshot of the state machine and truncates the log.
+
+**Dynamic Membership**: Add/remove nodes using joint consensus - the cluster agrees on membership changes through the same Raft log.
+
+## 🐛 Troubleshooting
+
+**Cluster won't start:**
+```bash
+# Check for port conflicts
+lsof -i :9010
+
+# Kill stray processes
+pkill -f start_node
+
+# Check logs
+tail -f node1.log
+```
+
+**Import errors:**
+```bash
+# Reinstall in development mode
+pip install -e .
+```
+
+**Connection refused:**
+```bash
+# Verify nodes are running
+ps aux | grep start_node
+
+# Check if ports are open
+nc -zv localhost 9010
+```
+
+## 📄 License
+
+MIT License - See LICENSE file for details
+
+## 🙏 Acknowledgments
+
+Based on the [Raft consensus algorithm](https://raft.github.io/) by Diego Ongaro and John Ousterhout.
+
+---
+
+**Built for learning, designed for reliability.**
