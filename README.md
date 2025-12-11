@@ -1,8 +1,8 @@
-# Raft Consensus Implementation
+# Raft Replicated Key Value Store: etcd-like implementation
 
-A production-quality implementation of the Raft consensus algorithm in Python, featuring leader election, log replication, snapshots, dynamic membership, and lease-based reads.
+A production-quality implementation of the Raft consensus algorithm, featuring leader election, log replication, snapshots, dynamic membership, and lease-based reads.
 
-## 🎯 What This Project Delivers
+## What This Project Delivers
 
 **Two ways to use this project:**
 
@@ -19,8 +19,7 @@ Build your own distributed systems on top of Raft consensus:
 from raft import RaftNode, Command, CommandType
 # Create custom distributed applications
 ```
-
-## 🚀 Quick Start
+## Quickstart
 
 ### Installation
 
@@ -73,7 +72,7 @@ node.propose_command(cmd)
 value = node.get("key")
 ```
 
-## Architecture at a Glance
+## Architecture 
 
 ```
    +-------------+                 +----------------+
@@ -95,10 +94,14 @@ value = node.get("key")
    WAL + B-Tree storage             WAL + B-Tree storage
    (raft_data/node1)                (raft_data/node2)
 ```
+**Key Components:**
+- **HTTP Server**: Client-facing API (ports 9010-9012)
+- **gRPC Server**: Inter-node Raft RPCs (ports 9001-9003)
+- **KVStore**: B-tree based key-value storage with WAL
+- **Snapshots**: Automatic log compaction
+- **Lease Manager**: Fast follower reads with lease validation
 
-Each Raft node exposes an HTTP surface for clients, a gRPC surface for consensus, and persists to `raft_data/node*/{log,state,snapshots}` so that the demo commands can prove durability, replication, failover, and compaction end-to-end.
-
-## ✨ Features
+## Features
 
 | Feature | Description |
 |---------|-------------|
@@ -111,14 +114,15 @@ Each Raft node exposes an HTTP surface for clients, a gRPC surface for consensus
 | **Metrics** | Prometheus-compatible metrics endpoint |
 | **CLI Tool** | Simple command-line interface (`raft-cli`) |
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 raft/                   # Importable Python library
 ├── core/               # Raft consensus algorithm
 │   ├── node.py         # Main RaftNode implementation
 │   ├── log.py          # Replicated log
-│   └── command.py      # State machine commands
+│   ├── command.py      # State machine commands
+│   └── state_machine.py # Deterministic state machine
 ├── storage/            # Persistence layer
 │   ├── kvstore.py      # Key-value store
 │   ├── btree.py        # B-tree for ordered storage
@@ -126,17 +130,24 @@ raft/                   # Importable Python library
 │   └── snapshot.py     # Snapshot management
 ├── transport/          # Network layer
 │   ├── grpc_server.py  # gRPC for inter-node communication
+│   ├── grpc_client.py  # gRPC client
 │   ├── http_server.py  # HTTP API for clients
 │   └── rpc.py          # RPC definitions
+├── membership/         # Cluster membership
+│   └── dynamic.py      # Dynamic membership changes
 ├── features/           # Advanced features
 │   ├── lease.py        # Lease-based reads
 │   └── metrics.py      # Prometheus metrics
-└── proto/              # Protocol Buffers definitions
+└── proto/              # Protocol Buffers
+    ├── raft.proto      # Protocol buffer definitions
+    └── generated/      # Auto-generated gRPC code
 
 scripts/                # Operational tools
 ├── raft_cli.py         # CLI tool (installed as raft-cli)
 ├── start_cluster.sh    # Start 3-node cluster
 ├── stop_cluster.sh     # Stop cluster
+├── demo_visualizer.py  # Real-time cluster dashboard
+├── compile_protos.sh   # Compile protocol buffers
 └── test_all_features.sh # Automated test suite
 ```
 
@@ -155,21 +166,21 @@ This automated test validates all features end-to-end:
 - ✅ Lease-based read caching
 - ✅ Snapshot creation & log compaction
 
-**Note:** The `tests/` directory contains legacy unit tests from the previous flat structure. These are not currently maintained but are kept for reference. Use `test_all_features.sh` for validation.
+**Note:** The `tests/` directory contains legacy unit tests from the previous structure. These are not currently maintained but are kept for reference. 
 
-## 📖 Usage Examples
+## Examples for how to use 
 
 ### Basic Operations
 
 ```bash
 # Write
-raft-cli put user:alice "Alice Johnson"
+raft-cli put user:Rwan "doing her best"
 
 # Read
-raft-cli get user:alice
+raft-cli get user:Rwan
 
 # Delete
-raft-cli delete user:alice
+raft-cli delete user:Rwan 
 
 # Check cluster status
 raft-cli status
@@ -258,7 +269,7 @@ curl -s http://localhost:9010/metrics | grep raft_log_size
 curl -s http://localhost:9010/metrics | grep raft_elections_total
 ```
 
-## 🔧 Advanced: Using as a Library
+## Advanced: Using as a Library
 
 Create a custom distributed application:
 
@@ -308,40 +319,7 @@ for node in nodes:
     node.stop()
 ```
 
-## 🏗️ Architecture
-
-```
-┌─────────────┐
-│   Client    │
-│   (CLI/HTTP)│
-└──────┬──────┘
-       │ HTTP API
-       ▼
-┌──────────────────────────────────────┐
-│         Raft Node (Leader)           │
-│  ┌────────────┐  ┌────────────────┐ │
-│  │  HTTP API  │  │  KVStore       │ │
-│  └────────────┘  │  (B-tree+WAL)  │ │
-│  ┌────────────┐  └────────────────┘ │
-│  │gRPC Server │  ┌────────────────┐ │
-│  └────────────┘  │  Snapshots     │ │
-└──────┬───────────┴────────────────┬─┘
-       │ gRPC (AppendEntries)       │
-       ▼                            ▼
-┌─────────────┐            ┌─────────────┐
-│ Raft Node   │◄──────────►│ Raft Node   │
-│ (Follower)  │            │ (Follower)  │
-└─────────────┘            └─────────────┘
-```
-
-**Key Components:**
-- **HTTP Server**: Client-facing API (ports 9010-9012)
-- **gRPC Server**: Inter-node Raft RPCs (ports 9001-9003)
-- **KVStore**: B-tree based key-value storage with WAL
-- **Snapshots**: Automatic log compaction
-- **Lease Manager**: Fast follower reads with lease validation
-
-## 🛠️ Development
+## Development
 
 ### Prerequisites
 - Python 3.8+
@@ -379,55 +357,10 @@ pip install -e .
 
 **Note:** Legacy unit tests in `tests/` are not maintained. They use the old flat structure and would require refactoring to work with the current package organization.
 
-## 📚 Key Concepts
-
-**Leader Election**: When a follower doesn't receive heartbeats, it starts an election. Nodes vote based on log completeness. First to get majority becomes leader.
-
-**Log Replication**: Leader appends client commands to its log, then sends AppendEntries RPCs to followers. Once majority confirm, the entry is committed.
-
-**Lease-Based Reads**: Followers can serve reads without contacting the leader if they have a valid lease (heartbeat within 5s). This provides eventual consistency with 10x performance gain.
-
-**Snapshots**: When the log grows beyond 100 entries, the system creates a snapshot of the state machine and truncates the log.
-
-**Dynamic Membership**: Add/remove nodes using joint consensus - the cluster agrees on membership changes through the same Raft log.
-
-## 🐛 Troubleshooting
-
-**Cluster won't start:**
-```bash
-# Check for port conflicts
-lsof -i :9010
-
-# Kill stray processes
-pkill -f start_node
-
-# Check logs
-tail -f node1.log
-```
-
-**Import errors:**
-```bash
-# Reinstall in development mode
-pip install -e .
-```
-
-**Connection refused:**
-```bash
-# Verify nodes are running
-ps aux | grep start_node
-
-# Check if ports are open
-nc -zv localhost 9010
-```
-
-## 📄 License
-
-MIT License - See LICENSE file for details
-
-## 🙏 Acknowledgments
+## Acknowledgments
 
 Based on the [Raft consensus algorithm](https://raft.github.io/) by Diego Ongaro and John Ousterhout.
 
 ---
 
-**Built for learning, designed for reliability.**
+
