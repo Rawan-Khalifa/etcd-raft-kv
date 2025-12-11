@@ -14,3 +14,4 @@ venv/
 node*.log
 raft_data/
 .DS_Store
+node*.pid

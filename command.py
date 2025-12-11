@@ -4,8 +4,10 @@ import json
 
 class CommandType(Enum):
     """Types of commands our system supports"""
-    PUT = "PUT"
-    DELETE = "DELETE"
+    PUT = "put"
+    DELETE = "delete"
+    MEMBERSHIP_ADD = "membership_add"      # ADD THIS
+    MEMBERSHIP_REMOVE = "membership_remove" # ADD THIS
     # GET is not a command because it doesn't modify state
     # (reads don't need to go through Raft)
 

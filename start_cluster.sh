@@ -16,15 +16,15 @@ echo
 
 # Start nodes
 echo "Starting nodes..."
-python3 start_node1.py > node1.log 2>&1 &
+.venv/bin/python start_node1.py > node1.log 2>&1 &
 NODE1_PID=$!
 echo "  Started node1 (PID: $NODE1_PID, gRPC: localhost:9001)"
 
-python3 start_node2.py > node2.log 2>&1 &
+.venv/bin/python start_node2.py > node2.log 2>&1 &
 NODE2_PID=$!
 echo "  Started node2 (PID: $NODE2_PID, gRPC: localhost:9002)"
 
-python3 start_node3.py > node3.log 2>&1 &
+.venv/bin/python start_node3.py > node3.log 2>&1 &
 NODE3_PID=$!
 echo "  Started node3 (PID: $NODE3_PID, gRPC: localhost:9003)"
 
