@@ -11,16 +11,18 @@ class StateMachine:
     state machine and apply the same commands in the same order.
     """
     
-    def __init__(self, store: KVStore, log: Log):
+    def __init__(self, store: KVStore, log: Log, raft_node=None):
         """
         Initialize the state machine.
         
         Args:
             store: The KVStore to apply commands to
             log: The replicated log containing commands
+            raft_node: Optional reference to RaftNode for membership changes
         """
         self.store = store
         self.log = log
+        self.raft_node = raft_node  # For membership operations
         self._lock = threading.RLock() # yup for safety
     
     def apply_command(self, command: Command) -> any:
@@ -39,6 +41,26 @@ class StateMachine:
             
             elif command.type == CommandType.DELETE:
                 return self.store.delete(command.key)
+            
+            elif command.type == CommandType.MEMBERSHIP_ADD:
+                if self.raft_node and hasattr(self.raft_node, 'dynamic_membership'):
+                    peer_address = command.key
+                    self.raft_node.dynamic_membership.apply_membership_change('add', peer_address)
+                    # Update peers list
+                    self.raft_node.peers = list(self.raft_node.dynamic_membership.current_peers)
+                    print(f"[StateMachine] Added member {peer_address}, peers now: {self.raft_node.peers}")
+                    return True
+                return False
+            
+            elif command.type == CommandType.MEMBERSHIP_REMOVE:
+                if self.raft_node and hasattr(self.raft_node, 'dynamic_membership'):
+                    peer_address = command.key
+                    self.raft_node.dynamic_membership.apply_membership_change('remove', peer_address)
+                    # Update peers list
+                    self.raft_node.peers = list(self.raft_node.dynamic_membership.current_peers)
+                    print(f"[StateMachine] Removed member {peer_address}, peers now: {self.raft_node.peers}")
+                    return True
+                return False
             
             else:
                 raise ValueError(f"Unknown command type: {command.type}")
