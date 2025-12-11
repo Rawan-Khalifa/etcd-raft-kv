@@ -79,6 +79,10 @@ class RaftRPCServicer(raft_pb2_grpc.RaftRPCServicer):
             
             internal_response = self.raft_node.handle_append_entries(internal_request)
             
+            # Refresh lease on successful AppendEntries (enables follower reads)
+            if internal_response.success:
+                self.raft_node.lease_manager.refresh_lease(request.leader_id)
+            
             # DEBUG: Log response
             print(f"[gRPC-Server] <<< Returning: success={internal_response.success}, match_index={internal_response.match_index}, term={internal_response.term}", flush=True)
             

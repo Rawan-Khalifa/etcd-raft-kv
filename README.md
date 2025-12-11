@@ -175,16 +175,25 @@ pip install -r requirements.txt
    ```
 
 ## 7. gRPC Transport & Lease-Based Reads
-1. Demonstrate follower latency before/after the lease cache:
-   _What it does_: runs two follower reads back-to-back. The first forces a lease validation round-trip to the leader over gRPC; the second should be served from the follower's lease cache, showing lower latency.
+1. Write a test key first:
+   _What it does_: creates a key that exists so lease-based reads can demonstrate the cache speedup.
    ```bash
-   time curl -s http://localhost:9011/kv/key_50 >/dev/null
-   time curl -s http://localhost:9011/kv/key_50 >/dev/null
+   # Get leader and convert to HTTP port (node1->9010, node2->9011, node3->9012)
+   LEADER_ID=$(curl -s http://localhost:9010/status | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['leader_id'])")
+   LEADER_PORT=$((9009 + ${LEADER_ID#node}))
+   curl -X PUT http://localhost:$LEADER_PORT/kv/lease_test -H 'Content-Type: application/json' -d '{"value": "testing leases"}'
+   sleep 1
    ```
-2. Inspect response payload (shows lease headers in JSON):
-   _What it does_: dumps the follower's GET response to confirm lease metadata (e.g., freshness timestamps) is attached, proving the HTTP layer is aware of lease grants from the Raft leader.
+2. Demonstrate follower latency before/after the lease cache:
+   _What it does_: runs two follower reads back-to-back. The first forces a lease validation round-trip to the leader over gRPC; the second should be served from the follower's lease cache, showing lower latency (though difference may be small on localhost).
    ```bash
-   curl -s http://localhost:9011/kv/key_50 | python3 -m json.tool
+   time curl -s http://localhost:9011/kv/lease_test >/dev/null
+   time curl -s http://localhost:9011/kv/lease_test >/dev/null
+   ```
+3. Inspect response payload (shows lease headers in JSON):
+   _What it does_: dumps the follower's GET response to confirm the key value is returned correctly from the replicated state.
+   ```bash
+   curl -s http://localhost:9010/kv/lease_test | python3 -m json.tool
    ```
 
 ## 8. Dynamic Membership (Optional)

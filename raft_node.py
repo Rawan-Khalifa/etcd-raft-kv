@@ -65,7 +65,7 @@ class RaftNode:
 
         # Lease-based reads for 10x performance
         self.lease_manager = LeaseManager(lease_duration_ms=500)
-        self.read_cache = ReadCache(ttl_seconds=1.0)
+        self.read_cache = ReadCache(ttl_seconds=5.0)
 
         # Dynamic membership management
         self.dynamic_membership = DynamicMembership(list(peers))
