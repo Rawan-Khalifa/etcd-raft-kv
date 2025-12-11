@@ -811,8 +811,12 @@ class RaftNode:
         Advance commit_index based on what's been replicated to a majority.
         
         Leader commits an entry once it's replicated to a majority of servers.
+        Per Raft paper §5.4.2: leader can only commit entries from current term.
+        But once a current-term entry is committed, all prior entries are implicitly committed.
         """
         # Count how many nodes have each index
+        highest_committable = self.commit_index
+        
         for n in range(self.commit_index + 1, self.log.last_index() + 1):
             # Count ourselves
             count = 1
@@ -822,17 +826,20 @@ class RaftNode:
                 if self.match_index.get(peer_address, 0) >= n:
                     count += 1
             
-            # If majority has this entry, and it's from current term, commit it
+            # If majority has this entry, and it's from current term, we can commit it
             total_nodes = len(self.peers) + 1  # peers + self
             majority = (total_nodes // 2) + 1
-            
-            print(f"[{self.node_id}] Check index {n}: count={count}, majority={majority}, match_index={self.match_index}", flush=True)
             
             if count >= majority:
                 entry = self.log.get(n)
                 if entry and entry.term == self.current_term:
-                    self.commit_index = n
-                    print(f"[{self.node_id}] Advanced commit_index to {n}")
+                    highest_committable = n
+        
+        # Commit up to the highest current-term entry that has been replicated
+        if highest_committable > self.commit_index:
+            old_commit = self.commit_index
+            self.commit_index = highest_committable
+            print(f"[{self.node_id}] Advanced commit_index: {old_commit} -> {self.commit_index}")
         
     def propose_command(self, command: Command) -> dict:
         """

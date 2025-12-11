@@ -149,25 +149,29 @@ pip install -r requirements.txt
 
 ## 6. Snapshots & Log Compaction
 1. Baseline snapshot/log stats:
-   _What it does_: inspects `/status.snapshot` to capture the pre-load values for `log_size`, `last_applied`, and the snapshot list so you can compare after bulk writes.
+   _What it does_: inspects `/status.snapshot` to capture the pre-load values for `log_size`, `last_applied`, and the snapshot list so you can compare after bulk writes. Queries the leader node since only the leader creates snapshots.
    ```bash
-   curl -s http://localhost:9010/status | python3 -c "import sys,json; d=json.load(sys.stdin); s=d['snapshot']; print(f'Log entries: {d[\"log_size\"]}, Last applied: {d[\"last_applied\"]}, Snapshots: {len(s.get(\"snapshots\", []))}')"
+   LEADER_PORT=$(curl -s http://localhost:9010/status | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['leader_id'].replace('node','901'))")
+   curl -s http://localhost:$LEADER_PORT/status | python3 -c "import sys,json; d=json.load(sys.stdin); s=d['snapshot']; print(f'Log entries: {d[\"log_size\"]}, Last applied: {d[\"last_applied\"]}, Snapshots: {len(s.get(\"snapshots\", []))}')"
    ```
 2. Flood writes to cross the snapshot interval (default 100 entries):
-   _What it does_: inserts 120 keys so the log exceeds the snapshot threshold configured in `snapshot.py`, forcing the leader to cut a snapshot and compact its WAL.
+   _What it does_: inserts 120 keys so the log exceeds the snapshot threshold configured in `snapshot.py`, forcing the leader to cut a snapshot and compact its WAL. Writes go to the leader port.
    ```bash
+   LEADER_PORT=$(curl -s http://localhost:9010/status | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['leader_id'].replace('node','901'))")
    for i in {1..120}; do
-     curl -X PUT http://localhost:9010/kv/key_$i \
+     curl -X PUT http://localhost:$LEADER_PORT/kv/key_$i \
        -H 'Content-Type: application/json' \
        -d "{\"value\": \"value_$i\"}" >/dev/null 2>&1
      if [ $((i % 30)) -eq 0 ]; then echo "  Written $i keys"; fi
    done
    ```
 3. Confirm a snapshot materialized:
-   _What it does_: re-checks `/status.snapshot` and lists the snapshot directory to verify new metadata/segments were produced and the `last_snapshot_index` advanced.
+   _What it does_: re-checks `/status.snapshot` and lists the snapshot directory to verify new metadata/segments were produced and the `last_snapshot_index` advanced. Checks the leader's data directory.
    ```bash
-   curl -s http://localhost:9010/status | python3 -c "import sys,json; d=json.load(sys.stdin); s=d['snapshot']; print(f'Snapshots: {len(s.get(\"snapshots\", []))}, Last index: {s.get(\"last_snapshot_index\", 0)}')"
-   ls -lah raft_data/node1/snapshots/ | tail -5
+   LEADER_ID=$(curl -s http://localhost:9010/status | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['leader_id'])")
+   LEADER_PORT=$(echo $LEADER_ID | sed 's/node/901/')
+   curl -s http://localhost:$LEADER_PORT/status | python3 -c "import sys,json; d=json.load(sys.stdin); s=d['snapshot']; print(f'Snapshots: {len(s.get(\"snapshots\", []))}, Last index: {s.get(\"last_snapshot_index\", 0)}')"
+   ls -lah raft_data/$LEADER_ID/snapshots/ | tail -5
    ```
 
 ## 7. gRPC Transport & Lease-Based Reads
