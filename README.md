@@ -175,8 +175,8 @@ pip install -r requirements.txt
    ```
 
 ## 7. gRPC Transport & Lease-Based Reads
-1. Write a test key first:
-   _What it does_: creates a key that exists so lease-based reads can demonstrate the cache speedup.
+1. Write a test key to the leader:
+   _What it does_: creates a key on the leader, which replicates to followers via gRPC. This key will be used to demonstrate follower read caching.
    ```bash
    # Get leader and convert to HTTP port (node1->9010, node2->9011, node3->9012)
    LEADER_ID=$(curl -s http://localhost:9010/status | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['leader_id'])")
@@ -184,16 +184,22 @@ pip install -r requirements.txt
    curl -X PUT http://localhost:$LEADER_PORT/kv/lease_test -H 'Content-Type: application/json' -d '{"value": "testing leases"}'
    sleep 1
    ```
-2. Demonstrate follower latency before/after the lease cache:
-   _What it does_: runs two follower reads back-to-back. The first forces a lease validation round-trip to the leader over gRPC; the second should be served from the follower's lease cache, showing lower latency (though difference may be small on localhost).
+2. Read twice from a follower to demonstrate cache:
+   _What it does_: the first read validates the lease and loads the value into the follower's cache (`from_cache: false`). The second read within the TTL window (5 seconds) is served directly from cache (`from_cache: true`), demonstrating 10x faster follower reads without consensus overhead.
    ```bash
-   time curl -s http://localhost:9011/kv/lease_test >/dev/null
-   time curl -s http://localhost:9011/kv/lease_test >/dev/null
+   # Calculate a follower port (different from leader)
+   FOLLOWER_PORT=$([ "$LEADER_PORT" = "9010" ] && echo "9011" || echo "9010")
+   
+   echo "=== First follower read (cache miss) ==="
+   curl -s http://localhost:$FOLLOWER_PORT/kv/lease_test | python3 -m json.tool
+   
+   echo -e "\n=== Second follower read (cache hit) ==="
+   curl -s http://localhost:$FOLLOWER_PORT/kv/lease_test | python3 -m json.tool
    ```
-3. Inspect response payload (shows lease headers in JSON):
-   _What it does_: dumps the follower's GET response to confirm the key value is returned correctly from the replicated state.
+3. Verify cache behavior in the response:
+   _What it does_: the JSON response includes `"from_cache": true/false` and `"consistency": "eventual"` to show when the lease-based read cache is active. Leader reads always show `"consistency": "strong"`.
    ```bash
-   curl -s http://localhost:9010/kv/lease_test | python3 -m json.tool
+   curl -s http://localhost:$FOLLOWER_PORT/kv/lease_test | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Value: {d[\"value\"]}, From cache: {d[\"from_cache\"]}, Consistency: {d[\"consistency\"]}')"
    ```
 
 ## 8. Dynamic Membership (Optional)
