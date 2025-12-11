@@ -23,10 +23,11 @@ class LeaseManager:
         """Refresh lease when heartbeat received from leader"""
         self.last_leader_heartbeat = time.time() * 1000
         self.leader_id = leader_id
+        print(f"[LeaseManager] Refreshed lease for leader {leader_id} at {self.last_leader_heartbeat}", flush=True)
     
     def is_lease_valid(self) -> bool:
         """Check if leader lease is still valid"""
-        if not self.leader_id:
+        if not self.leader_id or self.last_leader_heartbeat == 0:
             return False
         
         elapsed = (time.time() * 1000) - self.last_leader_heartbeat
@@ -47,9 +48,14 @@ class LeaseManager:
             return True
         elif node_state == "FOLLOWER" and self.is_lease_valid():
             # Follower can serve reads if leader lease is valid
+            elapsed = (time.time() * 1000) - self.last_leader_heartbeat
+            print(f"[LeaseManager] Follower can serve read: lease valid (elapsed={elapsed:.2f}ms, threshold={self.lease_duration_ms}ms)", flush=True)
             return True
         else:
             # Candidate should not serve reads
+            if node_state == "FOLLOWER":
+                elapsed = (time.time() * 1000) - self.last_leader_heartbeat
+                print(f"[LeaseManager] Follower CANNOT serve read: lease expired (elapsed={elapsed:.2f}ms, threshold={self.lease_duration_ms}ms)", flush=True)
             return False
 
 

@@ -191,17 +191,22 @@ class RaftRPCHandler(BaseHTTPRequestHandler):
             use_lease = False
             if self.lease_manager and self.read_cache:
                 node_state = self.raft_node.state.value
+                print(f"[HTTP-Server] GET {key}: state={node_state}, checking lease...", flush=True)
                 if self.lease_manager.can_serve_read(node_state):
                     use_lease = True
+                    print(f"[HTTP-Server] Lease valid! Checking cache...", flush=True)
                     # Try cache first
                     cached = self.read_cache.get(key)
                     if cached is not None:
+                        print(f"[HTTP-Server] Cache HIT for {key}", flush=True)
                         return self._send_json({
                             'key': key,
                             'value': cached,
                             'from_cache': True,
                             'consistency': 'eventual'
                         })
+                    else:
+                        print(f"[HTTP-Server] Cache MISS for {key}", flush=True)
             
             # Get value from state machine (always consistent)
             value = self.raft_node.get(key)
@@ -428,10 +433,10 @@ def create_raft_rpc_server(raft_node, host, port, enable_lease=True):
     # Bind the raft_node to the handler class
     BoundHandler.raft_node = raft_node
     
-    # Initialize lease manager and read cache if enabled
+    # Use the raft_node's lease manager and read cache (shared with gRPC server)
     if enable_lease:
-        BoundHandler.lease_manager = LeaseManager(lease_duration_ms=500)
-        BoundHandler.read_cache = ReadCache(ttl_seconds=1.0)
+        BoundHandler.lease_manager = raft_node.lease_manager
+        BoundHandler.read_cache = raft_node.read_cache
     
     # Create server with the bound handler
     class QuietHTTPServer(HTTPServer):
