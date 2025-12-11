@@ -1,6 +1,6 @@
 # Raft Replicated Key Value Store: etcd-like implementation
 
-A production-quality implementation of the Raft consensus algorithm, featuring leader election, log replication, snapshots, dynamic membership, and lease-based reads.
+An implementation of the Raft consensus algorithm, featuring leader election, log replication, snapshots, dynamic membership, and lease-based reads.
 
 ## What This Project Delivers
 
@@ -37,10 +37,13 @@ pip install -e .  # Installs library + CLI tool
 # Start 3-node cluster
 ./scripts/start_cluster.sh
 
+# Run the demo visualizer in another tap
+python ./scripts/demo_visualizer.py
+
 # Interact using the CLI
 raft-cli status                    # Check cluster health
-raft-cli put mykey myvalue         # Write data
-raft-cli get mykey                 # Read data
+raft-cli put key1 AmazingValue     # Write data
+raft-cli get key1                  # Read data
 raft-cli members                   # List cluster members
 
 # Or use curl directly
@@ -98,8 +101,8 @@ value = node.get("key")
 - **HTTP Server**: Client-facing API (ports 9010-9012)
 - **gRPC Server**: Inter-node Raft RPCs (ports 9001-9003)
 - **KVStore**: B-tree based key-value storage with WAL
-- **Snapshots**: Automatic log compaction
-- **Lease Manager**: Fast follower reads with lease validation
+- **Snapshots**: Automatic log compaction (after 100 entries)
+- **Lease Manager**: Fast follower reads with lease validation (5 seconds)
 
 ## Features
 
@@ -151,7 +154,7 @@ scripts/                # Operational tools
 └── test_all_features.sh # Automated test suite
 ```
 
-## 🧪 Testing
+## Testing
 
 Run the comprehensive integration test suite:
 ```bash
@@ -208,10 +211,10 @@ python scripts/start_node1.py > node1.log 2>&1 &
 ### Lease-Based Reads (10x Faster)
 
 ```bash
-# Write to leader
+# Write to leader ()
 curl -X PUT http://localhost:9010/kv/testkey \
   -H 'Content-Type: application/json' \
-  -d '{"value": "testvalue"}'
+  -d '{"value": "YouGotThis"}'
 
 # First read from follower (cache miss)
 curl http://localhost:9011/kv/testkey
@@ -327,7 +330,6 @@ for node in nodes:
 
 ### Running Integration Tests
 ```bash
-# Comprehensive end-to-end test suite
 ./scripts/test_all_features.sh
 ```
 
@@ -362,5 +364,3 @@ pip install -e .
 Based on the [Raft consensus algorithm](https://raft.github.io/) by Diego Ongaro and John Ousterhout.
 
 ---
-
-
