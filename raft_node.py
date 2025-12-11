@@ -754,8 +754,10 @@ class RaftNode:
         print(f"[{node_id}] >>> Sending AppendEntries to {peer_address} (term={request.term})")
     
         
-        # Send RPC (outside lock to avoid blocking)
+        # Send RPC (outside lock to avoid blocking) and measure latency
+        start_time = time.time()
         response = self.rpc_client.append_entries(peer_address, request)
+        latency_ms = (time.time() - start_time) * 1000
         
         if response is None:
             # Log why it failed occasionally
@@ -786,6 +788,9 @@ class RaftNode:
                 return False  # FIXED: was "return" (None), now returns False
             
             if response.success:
+                # Record successful replication latency
+                self.metrics.record_replication_latency(latency_ms)
+                
                 # Update next_index and match_index for follower
                 old_match = self.match_index.get(peer_address, 0)
                 self.match_index[peer_address] = response.match_index

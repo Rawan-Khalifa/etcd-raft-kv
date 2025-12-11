@@ -48,6 +48,9 @@ class Metrics:
         if self.last_election_time:
             latency = (time.time() - self.last_election_time) * 1000
             self.election_latency_ms.append(latency)
+            # Cap histogram samples at 1000 entries
+            if len(self.election_latency_ms) > 1000:
+                self.election_latency_ms.pop(0)
     
     def record_election_lost(self):
         """Record failed election"""
@@ -60,8 +63,10 @@ class Metrics:
             self.last_leader_id = new_leader_id
     
     def record_replication_latency(self, latency_ms: float):
-        """Record replication latency"""
+        """Record replication latency (keep last 1000 samples)"""
         self.replication_latency_ms.append(latency_ms)
+        if len(self.replication_latency_ms) > 1000:
+            self.replication_latency_ms.pop(0)  # Remove oldest
     
     def update_state(self, current_term: int, commit_index: int, 
                      last_applied: int, log_size: int, peer_count: int):
